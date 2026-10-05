@@ -103,6 +103,7 @@ fun SoftphoneNav(
     onOpenMessagesPeerConsumed: () -> Unit = {},
     forceShowIncoming: Boolean = false,
     onIncomingUiShown: () -> Unit = {},
+    onCallSessionEnded: () -> Unit = {},
 ) {
     val nav = rememberNavController()
     val vm: SoftphoneViewModel = viewModel(
@@ -242,6 +243,8 @@ fun SoftphoneNav(
                     launchSingleTop = true
                 }
             }
+            // Locked-screen calls return to the keyguard. Unlocked calls stay.
+            onCallSessionEnded()
         }
     }
 

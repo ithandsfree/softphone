@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import net.ithandsfree.softphone.data.normalizeEnrolToken
 import net.ithandsfree.softphone.sip.IncomingCallNotifier
+import net.ithandsfree.softphone.sip.LockScreenCallPolicy
 import net.ithandsfree.softphone.ui.SoftphoneNav
 import net.ithandsfree.softphone.ui.theme.IhfTheme
 import net.ithandsfree.softphone.ui.theme.SoftphoneSkins
@@ -29,10 +30,22 @@ class MainActivity : ComponentActivity() {
     private val openMessagesPeer = mutableStateOf<String?>(null)
     private val showIncomingCall = mutableStateOf(false)
 
+    /**
+     * Set when this activity was shown for a call that arrived over the
+     * keyguard. Cleared when that call ends. Survives rotation so hangup
+     * still returns to the lock screen.
+     */
+    private var returnToLockWhenCallEnds = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        returnToLockWhenCallEnds =
+            savedInstanceState?.getBoolean(STATE_RETURN_TO_LOCK) == true
         enableEdgeToEdge()
         applyDeepLinkIntent(intent)
+        if (returnToLockWhenCallEnds) {
+            applyOverLockWindow()
+        }
         val app = application as SoftphoneApp
         setContent {
             val skinId by app.skinPrefs.skinId.collectAsState()
@@ -58,9 +71,15 @@ class MainActivity : ComponentActivity() {
                     onOpenMessagesPeerConsumed = { openMessagesPeer.value = null },
                     forceShowIncoming = incoming,
                     onIncomingUiShown = { showIncomingCall.value = false },
+                    onCallSessionEnded = { onCallSessionEnded() },
                 )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_RETURN_TO_LOCK, returnToLockWhenCallEnds)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -71,10 +90,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Clear stale ring UI if the INVITE already ended while we were away.
         val app = application as SoftphoneApp
         if (!app.sipEngine.callSnapshot().active) {
+            // Clear stale ring UI if the INVITE already ended while we were away.
             IncomingCallNotifier.cancel(this)
+            return
+        }
+        // Full-screen start can run before the keyguard reports locked.
+        // Catch that here so hangup still knows to leave.
+        if (!returnToLockWhenCallEnds && keyguardOccluding()) {
+            returnToLockWhenCallEnds = true
+            applyOverLockWindow()
         }
     }
 
@@ -97,11 +123,24 @@ class MainActivity : ComponentActivity() {
         }
         if (incoming) {
             showIncomingCall.value = true
-            unlockForIncomingCall()
+            presentIncomingCall()
         }
     }
 
-    private fun unlockForIncomingCall() {
+    /**
+     * Draw the call over the lock screen. Do not dismiss the keyguard:
+     * that unlocks the phone into this activity, and hangup then leaves
+     * the user inside the app.
+     */
+    private fun presentIncomingCall() {
+        val arrival = LockScreenCallPolicy.onIncoming(keyguardOccluding())
+        if (arrival.returnToLockWhenCallEnds) {
+            returnToLockWhenCallEnds = true
+        }
+        applyOverLockWindow()
+    }
+
+    private fun applyOverLockWindow() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -109,14 +148,40 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
             )
         }
-        val kg = getSystemService(KeyguardManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            kg?.requestDismissKeyguard(this, null)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun onCallSessionEnded() {
+        val departure = LockScreenCallPolicy.onCallEnded(
+            returnToLockWhenCallEnds = returnToLockWhenCallEnds,
+            keyguardLocked = keyguardOccluding(),
+        )
+        returnToLockWhenCallEnds = false
+        if (departure.clearWindowFlags) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(false)
+                setTurnScreenOn(false)
+            } else {
+                @Suppress("DEPRECATION")
+                window.clearFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
+                )
+            }
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+        IncomingCallNotifier.cancel(this)
+        if (departure.moveTaskToBack) {
+            moveTaskToBack(true)
+        }
+    }
+
+    private fun keyguardOccluding(): Boolean {
+        val kg = getSystemService(KeyguardManager::class.java) ?: return false
+        return kg.isKeyguardLocked || kg.isDeviceLocked
     }
 
     private fun enrolTokenFrom(intent: Intent?): String? {
@@ -142,5 +207,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_INCOMING_CALL = "incoming_call"
         /** Notification Answer action — answer SIP and show Calls in-call UI. */
         const val EXTRA_ANSWER_CALL = "answer_call"
+        private const val STATE_RETURN_TO_LOCK = "return_to_lock_when_call_ends"
     }
 }
