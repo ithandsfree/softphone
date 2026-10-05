@@ -4,7 +4,7 @@ Android softphone and a small HTTPS API (BFF) for **FreePBX 17+**.
 
 Voice registers with PJSIP. SMS and MMS go through the FreePBX SMS Connector, not SIP MESSAGE. The phone never talks to FreePBX admin or UCP cookies; it uses a bearer token from this BFF (`X-IHF-Token`).
 
-License: **GPL-2.0**. See [LICENSE](LICENSE).
+License: **GPL-2.0**. See [LICENSE](LICENSE). The store listing source link is this repository. The Play privacy policy is a different URL, recorded in [docs/PLAY.md](docs/PLAY.md).
 
 ## Support
 

@@ -54,6 +54,8 @@ android {
             buildConfigField("String", "BRAND_SUB", "\"IT HANDS FREE\"")
             buildConfigField("String", "FOOTER_TAG", "\"FreePBX softphone\"")
             buildConfigField("String", "USER_AGENT_NAME", "\"IHF-Softphone\"")
+            // IHF listing only. The privacy URL is a Play requirement, not GPL.
+            buildConfigField("boolean", "SHOW_IHF_PRIVACY", "true")
         }
         create("community") {
             dimension = "distribution"
@@ -67,6 +69,7 @@ android {
             buildConfigField("String", "BRAND_SUB", "\"FREEPBX\"")
             buildConfigField("String", "FOOTER_TAG", "\"FreePBX 17+\"")
             buildConfigField("String", "USER_AGENT_NAME", "\"Community-Softphone\"")
+            buildConfigField("boolean", "SHOW_IHF_PRIVACY", "false")
         }
     }
 

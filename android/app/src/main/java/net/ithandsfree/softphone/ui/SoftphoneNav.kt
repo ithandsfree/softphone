@@ -43,7 +43,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.navDeepLink
+import net.ithandsfree.softphone.BuildConfig
 import net.ithandsfree.softphone.R
+import net.ithandsfree.softphone.legal.LegalLinks
 import net.ithandsfree.softphone.SoftphoneApp
 import net.ithandsfree.softphone.data.AccountStore
 import net.ithandsfree.softphone.notify.MessageSyncService
@@ -70,10 +72,12 @@ import net.ithandsfree.softphone.ui.screens.ComposeMessageScreen
 import net.ithandsfree.softphone.ui.screens.ContactDetailScreen
 import net.ithandsfree.softphone.ui.screens.ContactsScreen
 import net.ithandsfree.softphone.ui.screens.EnrollScreen
+import net.ithandsfree.softphone.ui.screens.LicencesScreen
 import net.ithandsfree.softphone.ui.screens.LineDetailScreen
 import net.ithandsfree.softphone.ui.screens.LinesHomeScreen
 import net.ithandsfree.softphone.ui.screens.MessagesScreen
 import net.ithandsfree.softphone.ui.screens.SettingsScreen
+import net.ithandsfree.softphone.ui.screens.openLegalUrl
 import net.ithandsfree.softphone.ui.screens.SplashScreen
 import net.ithandsfree.softphone.ui.screens.WelcomeCodeScreen
 import net.ithandsfree.softphone.ui.screens.WelcomeLinkSentScreen
@@ -624,12 +628,24 @@ fun SoftphoneNav(
                         onOpenLine = { id -> nav.navigate("app/lines/line/$id") },
                         onEnrol = { openWelcomeKit(addingLine = true) },
                         onOpenAppearance = { nav.navigate("app/settings/appearance") },
+                        onOpenPrivacy = if (BuildConfig.SHOW_IHF_PRIVACY) {
+                            { openLegalUrl(context, LegalLinks.PRIVACY_SECTION) }
+                        } else {
+                            null
+                        },
+                        onOpenLicences = { nav.navigate("app/settings/licences") },
                     )
                 }
                 composable("app/settings/appearance") {
                     AppearanceScreen(
                         skinPrefs = skinPrefs,
                         onBack = { nav.popBackStack() },
+                    )
+                }
+                composable("app/settings/licences") {
+                    LicencesScreen(
+                        onBack = { nav.popBackStack() },
+                        onOpenSource = { openLegalUrl(context, LegalLinks.SOURCE_REPOSITORY) },
                     )
                 }
             }

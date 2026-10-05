@@ -1,5 +1,8 @@
 package net.ithandsfree.softphone.ui.screens
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,14 +31,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import net.ithandsfree.softphone.BuildConfig
 import net.ithandsfree.softphone.data.KeypadPrefs
+import net.ithandsfree.softphone.legal.LegalLinks
 import net.ithandsfree.softphone.data.SkinPrefs
 import net.ithandsfree.softphone.notify.NotifyPrefs
 import net.ithandsfree.softphone.ui.SoftphoneViewModel
+import net.ithandsfree.softphone.ui.theme.IbmPlexMonoFamily
 import net.ithandsfree.softphone.ui.theme.IhfThemeAccess
 import net.ithandsfree.softphone.ui.theme.LocalIhfType
 import net.ithandsfree.softphone.ui.theme.SoftphoneSkin
@@ -50,6 +58,8 @@ fun SettingsScreen(
     onOpenLine: (String) -> Unit,
     onEnrol: () -> Unit,
     onOpenAppearance: () -> Unit,
+    onOpenPrivacy: (() -> Unit)?,
+    onOpenLicences: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
     val skinId by skinPrefs.skinId.collectAsState()
@@ -157,7 +167,27 @@ fun SettingsScreen(
                 "${state.call.stateText} · ${state.call.remote}",
             ) { vm.hangupCall() }
         }
+        Spacer(Modifier.height(16.dp))
+        Text("ABOUT", style = type.overline, color = c.caption)
+        if (onOpenPrivacy != null) {
+            SettingsRow(
+                title = "Privacy",
+                subtitle = "Privacy policy",
+                onClick = onOpenPrivacy,
+            )
+        }
+        SettingsRow(
+            title = "Licences",
+            subtitle = "GPL-2.0 and source code",
+            onClick = onOpenLicences,
+        )
     }
+}
+
+fun openLegalUrl(context: Context, url: String) {
+    val safe = LegalLinks.httpsUrl(url) ?: return
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safe))
+    runCatching { context.startActivity(intent) }
 }
 
 @Composable
@@ -205,6 +235,69 @@ fun AppearanceScreen(
             )
             Spacer(Modifier.height(10.dp))
         }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+fun LicencesScreen(
+    onBack: () -> Unit,
+    onOpenSource: () -> Unit,
+) {
+    val context = LocalContext.current
+    val licenceText = remember {
+        context.assets.open(LegalLinks.LICENSE_ASSET).bufferedReader().use { it.readText() }
+    }
+    val c = IhfThemeAccess.colors
+    val type = LocalIhfType.current
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(c.ground)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = c.text,
+                )
+            }
+            Text("Licences", style = type.titleSm, color = c.text)
+        }
+        Text(
+            "Version ${BuildConfig.VERSION_NAME}",
+            style = type.caption,
+            color = c.caption,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "This app is free software under the GNU General Public License, version 2. " +
+                "The licence text shipped with this build is below. " +
+                "Source code is a separate link from the privacy policy.",
+            style = type.body,
+            color = c.muted,
+        )
+        Spacer(Modifier.height(8.dp))
+        SettingsRow(
+            title = "Source code",
+            subtitle = "github.com/ithandsfree/softphone",
+            onClick = onOpenSource,
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            licenceText,
+            style = type.caption.copy(fontFamily = IbmPlexMonoFamily),
+            color = c.muted,
+        )
         Spacer(Modifier.height(24.dp))
     }
 }

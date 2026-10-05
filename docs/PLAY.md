@@ -13,11 +13,19 @@ Use a separate upload key for each application id. Keystores stay out of git. Se
 
 ## Before closed testing
 
-- [ ] GPL-2.0 license text ships with the app and the source repo
+Privacy policy and GPL are separate. Google Play requires the privacy URL. GPL-2.0 requires the licence text in the app and a way to get the source. One link does not cover the other.
+
+- [x] GPL-2.0 licence text ships with the app (Settings → Licences) and in this repo (`LICENSE`)
+- [x] Source is available, separate from the privacy policy: https://github.com/ithandsfree/softphone
+      That URL goes on the store listing and is the in-app Licences → Source code row.
 - [ ] PJSIP used under GPL (this repo), not a closed Teluu build
 - [ ] No live hostnames, mailboxes, or extensions in the source that is tagged for the build
 - [ ] `community` build leaves the PBX URL and SIP domain empty
-- [ ] Privacy policy URL (contacts, microphone, notifications)
+- [ ] IHF listing privacy policy URL, for the Play Console: https://ithandsfree.com/privacy
+      Live once the website zip is deployed. This is not a GPL requirement.
+- [ ] IHF in-app Privacy row and Data safety deletion link: https://ithandsfree.com/privacy#ihf-phone
+      The `ihf` flavor opens this from Settings. The `community` flavor hides that row.
+- [ ] Community listing privacy policy URL. Do not reuse the IHF policy.
 - [ ] Data safety form: encrypted on-device credentials, BFF token, optional contacts
 - [ ] Target API level matches current Play requirements
 - [ ] Closed testing track first; production and any charge come later
