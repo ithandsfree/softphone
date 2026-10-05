@@ -8,7 +8,7 @@ You will do three things:
 2. Install the **Community Softphone** app on the phone.
 3. Enrol one extension.
 
-FreePBX **17 or later** is the supported platform. The phone needs a network path to that PBX (HTTPS for setup and messaging, TCP 5060 for calls).
+FreePBX **17 or later** is the supported platform. The phone needs a network path to that PBX (HTTPS for setup and messaging, SIP TLS on port 5061 for calls).
 
 iOS is not part of this guide.
 
@@ -137,10 +137,10 @@ Allow the phone's network to reach:
 | Purpose | Port | Required |
 | --- | --- | --- |
 | API (setup, SMS, MMS) | TCP 443, or the port in `public_base` | Yes |
-| SIP registration and calls | TCP 5060 | Yes, for voice |
+| SIP registration and calls | TCP 5061 (SIP TLS). TCP 5060 if the TLS transport cannot be created | Yes, for voice |
 | RTP audio | UDP 10000–20000 (FreePBX default) | Yes, for voice |
 
-Prefer **TCP** for SIP. The app tries TCP first. SIP TLS is included in the next build.
+The app registers with **SIP TLS** on port 5061 and checks the PBX certificate. TCP 5060 is the fallback. Avoid UDP SIP through carrier NAT.
 
 Do not open FreePBX Admin, User Manager admin, or the softphone page `/ihf-softphone/admin/` on the public port. If you add a public HTTPS vhost, limit it to `/ihf-softphone/` and deny `/ihf-softphone/admin` and `/v1/admin/*`.
 
@@ -203,7 +203,7 @@ This needs working outbound mail from the PBX, and the address must be the User 
 4. Enter the SIP domain if the screen asks for it, then continue.
 5. Add the SIP secret when you want voice.
 
-After either option, open **Settings**. **SIP status** should show `PJSIP 1001:OK` once the secret is saved and the phone can reach TCP 5060.
+After either option, open **Settings**. **SIP status** should show `PJSIP 1001:OK` once the secret is saved and the phone can reach SIP TLS on port 5061.
 
 Place a short call. If SMS is enabled, send a message from **Messages**.
 
@@ -238,7 +238,7 @@ Sign in with that User Manager account. Assign an extension and send the welcome
 | Health works on the PBX but not from your computer | DNS, firewall, or the certificate name does not match `pbx.example.com`. |
 | Login returns no `lines` | The User Manager user has no extension, or the extension has no SMS DID when you expected messaging. |
 | The phone says it cannot find the softphone URL | The community app field must be the full `https://…/ihf-softphone/index.php` URL, including a non-default port. |
-| Enrol succeeds but SIP status stays down | SIP secret, SIP domain, and TCP 5060 from the phone to the PBX. The extension transport in FreePBX must allow TCP. |
+| Enrol succeeds but SIP status stays down | SIP secret, SIP domain, and TCP 5061 from the phone to the PBX. The extension transport in FreePBX must allow TLS. TCP 5060 is the fallback when the TLS transport cannot be created. |
 | One-way or no audio | RTP UDP 10000–20000 from the phone to the PBX. |
 | SMS returns forbidden | SMS Connector is missing, or that line's `sms` capability is off in `config.php`. |
 | Setup email never arrives | `mail_from`, local `sendmail`, and SPF/DKIM. Use option A (User Manager password) until mail works. |

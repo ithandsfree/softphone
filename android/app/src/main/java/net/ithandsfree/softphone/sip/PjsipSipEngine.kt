@@ -46,6 +46,7 @@ class PjsipSipEngine(
     private var started = false
     private var udpTransportId = -1
     private var tcpTransportId = -1
+    private var tlsTransportId = -1
 
     private var accountsCfg: List<SoftphoneAccount> = emptyList()
     private var activeId: String? = null
@@ -94,9 +95,9 @@ class PjsipSipEngine(
                 epConfig.logConfig.consoleLevel = 4
                 ep.libInit(epConfig)
 
-                // Prefer TCP for SIP signalling — UDP REGISTER/INVITE through carrier
-                // NAT often yields one-way audio / stuck contacts. SIP TLS is included
-                // in the next build. Keep UDP only as last-resort fallback.
+                // SIP TLS on 5061. TCP is the fallback when the TLS transport cannot
+                // be created. UDP is only a last resort (carrier NAT / one-way audio).
+                tlsTransportId = createTlsTransport(ep)
                 try {
                     val tcp = TransportConfig().apply { port = 0 }
                     tcpTransportId = ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TCP, tcp)
@@ -104,7 +105,7 @@ class PjsipSipEngine(
                     Log.w(TAG, "TCP transport unavailable: ${e.message}")
                     tcpTransportId = -1
                 }
-                if (tcpTransportId < 0) {
+                if (tlsTransportId < 0 && tcpTransportId < 0) {
                     val udp = TransportConfig().apply { port = 0 }
                     udpTransportId = ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, udp)
                     Log.w(TAG, "Falling back to UDP SIP transport — expect NAT/one-way-audio risk")
@@ -118,7 +119,10 @@ class PjsipSipEngine(
                 // Creating thread is already registered by libCreate; register anyway
                 // so subsequent callers on this same thread stay consistent.
                 ensurePjThreadLocked()
-                Log.i(TAG, "PJSUA2 started (tcp=$tcpTransportId udp=$udpTransportId)")
+                Log.i(
+                    TAG,
+                    "PJSUA2 started (tls=$tlsTransportId tcp=$tcpTransportId udp=$udpTransportId)",
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "PJSUA2 start failed", e)
                 started = false
@@ -409,6 +413,32 @@ class PjsipSipEngine(
     private fun domainOf(cfg: SoftphoneAccount): String =
         cfg.sipDomain.ifBlank { BuildConfig.DEFAULT_SIP_DOMAIN }.trim()
 
+    private fun preferredSignalling(): SipSignalling = when {
+        tlsTransportId >= 0 -> SipSignalling.TLS
+        tcpTransportId >= 0 -> SipSignalling.TCP
+        else -> SipSignalling.UDP
+    }
+
+    private fun createTlsTransport(ep: Endpoint): Int {
+        val caFile = writeAndroidCaBundle(appContext)
+        if (caFile == null) {
+            Log.w(TAG, "SIP TLS skipped — no CA bundle to verify the PBX certificate")
+            return -1
+        }
+        return try {
+            val tls = TransportConfig().apply { port = 0 }
+            val tlsCfg = tls.tlsConfig
+            tlsCfg.caListFile = caFile
+            tlsCfg.verifyServer = true
+            tlsCfg.msecTimeout = 8_000L
+            tls.tlsConfig = tlsCfg
+            ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, tls)
+        } catch (e: Exception) {
+            Log.w(TAG, "TLS transport unavailable: ${e.message}")
+            -1
+        }
+    }
+
     private inner class SoftAccount(
         var cfg: SoftphoneAccount,
     ) : Account() {
@@ -422,8 +452,9 @@ class PjsipSipEngine(
             val domain = domainOf(account)
             val ext = account.sipExtension.trim()
             val acfg = AccountConfig()
-            acfg.idUri = "sip:$ext@$domain"
-            acfg.regConfig.registrarUri = "sip:$domain"
+            val signalling = preferredSignalling()
+            acfg.idUri = sipAccountIdUri(ext, domain)
+            acfg.regConfig.registrarUri = sipRegistrarUri(domain, signalling)
             acfg.regConfig.registerOnAdd = true
             // Refresh before expiry so cellular NAT bindings stay warm.
             acfg.regConfig.timeoutSec = 300
@@ -439,19 +470,20 @@ class PjsipSipEngine(
                 acfg.natConfig.viaRewriteUse = 1
                 acfg.natConfig.sdpNatRewriteUse = 1
             }.onFailure { Log.w(TAG, "natConfig unavailable: ${it.message}") }
-            // Prefer TCP for SIP (avoids UDP NAT / one-way-audio on mobile).
-            // UDP only if TCP transport failed to create at engine start.
-            if (tcpTransportId >= 0) {
-                acfg.sipConfig.transportId = tcpTransportId
-            } else if (udpTransportId >= 0) {
-                acfg.sipConfig.transportId = udpTransportId
+            // TLS when the transport exists. TCP, then UDP, only if it does not.
+            when (signalling) {
+                SipSignalling.TLS -> {
+                    acfg.sipConfig.transportId = tlsTransportId
+                    acfg.sipConfig.contactUriParams = ";transport=tls"
+                }
+                SipSignalling.TCP -> acfg.sipConfig.transportId = tcpTransportId
+                SipSignalling.UDP -> acfg.sipConfig.transportId = udpTransportId
             }
             // Optional SDES/SRTP so shared extensions with FreePBX Media Encryption
-            // (sdes) still negotiate. Secure-signaling=0 allows SRTP over TCP SIP.
-            // Desk phones use TLS. SIP TLS is included in the next softphone build.
+            // (sdes) still negotiate. Over TLS, SRTP requires secure signalling.
             runCatching {
                 acfg.mediaConfig.srtpUse = pjmedia_srtp_use.PJMEDIA_SRTP_OPTIONAL
-                acfg.mediaConfig.srtpSecureSignaling = 0
+                acfg.mediaConfig.srtpSecureSignaling = if (signalling == SipSignalling.TLS) 1 else 0
             }.onFailure { Log.w(TAG, "srtpUse unavailable: ${it.message}") }
             create(acfg, true)
         }
