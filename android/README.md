@@ -1,5 +1,7 @@
 # Android app
 
+Install walkthrough (PBX and phone): [../docs/INSTALL.md](../docs/INSTALL.md).
+
 Kotlin + Jetpack Compose client for the [BFF](../api/README.md).
 
 **Messaging:** SMS/MMS, multi-line inbox, enrol by email link or token.  

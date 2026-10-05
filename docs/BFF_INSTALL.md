@@ -1,6 +1,8 @@
 # Install the BFF on FreePBX 17+
 
-The BFF is a PHP front controller on the PBX. It bootstraps FreePBX (`/etc/freepbx.conf`) and uses User Manager plus the SMS module.
+Step-by-step install of the PBX API and the phone app: [INSTALL.md](INSTALL.md).
+
+This page is the reference for paths, config keys, and endpoints. The BFF is a PHP front controller on the PBX. It bootstraps FreePBX (`/etc/freepbx.conf`) and uses User Manager plus the SMS module.
 
 Web path on the PBX: `/ihf-softphone/`  
 Files: `/var/www/html/ihf-softphone/`  

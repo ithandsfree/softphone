@@ -33,11 +33,11 @@ See [docs/FLAVORS.md](docs/FLAVORS.md).
 | --- | --- |
 | `android/` | Kotlin + Jetpack Compose client |
 | `api/` | PHP BFF installed on the FreePBX host |
-| `docs/` | Support, install, flavors |
+| `docs/` | Install guide, support, flavors |
 | `skins-preview/` | HTML preview of the colour packs |
 
-## Quick start
+## Install
 
-1. Install the BFF on FreePBX 17+ — [docs/BFF_INSTALL.md](docs/BFF_INSTALL.md).
-2. Build the community app — [android/README.md](android/README.md).
-3. On the phone, enter `https://pbx.example.com/ihf-softphone/index.php` (your host) and the SIP domain, then enrol with User Manager or an emailed setup link.
+Follow [docs/INSTALL.md](docs/INSTALL.md). It walks through the PBX API, the Community Softphone APK, and enrolling one extension.
+
+Reference for endpoints and config keys: [docs/BFF_INSTALL.md](docs/BFF_INSTALL.md).
