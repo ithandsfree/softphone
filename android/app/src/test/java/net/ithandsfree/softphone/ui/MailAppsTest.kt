@@ -20,4 +20,17 @@ class MailAppsTest {
             selected.map { it.packageName },
         )
     }
+
+    @Test
+    fun gmailAsDefaultDoesNotHideOutlook() {
+        val selected = selectMailApps(
+            listOf(
+                MailAppTarget("com.google.android.gm", "gmail.Main", "Gmail"),
+                MailAppTarget("com.microsoft.office.outlook", "outlook.Main", "Outlook"),
+                MailAppTarget("com.android.chrome", "chrome.Main", "Chrome"),
+            ),
+            ownPackage = "net.ithandsfree.softphone",
+        )
+        assertEquals(listOf("Gmail", "Outlook"), selected.map { it.label })
+    }
 }

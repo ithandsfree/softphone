@@ -1,5 +1,6 @@
 package net.ithandsfree.softphone.ui
 
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -21,6 +22,8 @@ data class MailAppTarget(
 
 /**
  * Keep one entry per app, drop this app, and sort by the name the user sees.
+ * Callers pass every source together. A Gmail hit from the default-email
+ * category must not hide Outlook found another way.
  */
 fun selectMailApps(found: List<MailAppTarget>, ownPackage: String): List<MailAppTarget> {
     val seen = HashSet<String>()
@@ -28,45 +31,75 @@ fun selectMailApps(found: List<MailAppTarget>, ownPackage: String): List<MailApp
         .asSequence()
         .filter { it.packageName.isNotBlank() && it.activityName.isNotBlank() }
         .filter { it.packageName != ownPackage }
+        .filter { it.packageName !in browserPackages }
         .filter { seen.add(it.packageName) }
         .sortedBy { it.label.lowercase(Locale.ROOT) }
         .toList()
 }
 
 /**
- * Show every mail app installed on this phone (Gmail, Outlook, and others)
- * instead of opening whichever app is the default.
+ * Show the mail apps installed on this phone. The list is drawn in this app
+ * so Android cannot skip it and open the default (usually Gmail).
  */
 fun openMailAppChooser(context: Context) {
-    val targets = selectMailApps(discoverMailApps(context), context.packageName)
-    val intents = targets.map { target ->
-        Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_APP_EMAIL)
+    val apps = mailAppsOnDevice(context)
+    if (apps.isEmpty()) {
+        runCatching {
+            context.startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("mailto:")),
+                    "Choose email app",
+                ),
+            )
+        }
+        return
+    }
+    AlertDialog.Builder(context)
+        .setTitle("Choose email app")
+        .setItems(apps.map { it.label }.toTypedArray()) { _, which ->
+            launchMailApp(context, apps[which])
+        }
+        .setNegativeButton("Cancel", null)
+        .show()
+}
+
+internal fun mailAppsOnDevice(context: Context): List<MailAppTarget> {
+    val pm = context.packageManager
+    val fromCategory = queryActivities(
+        pm,
+        Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_EMAIL),
+    ).mapNotNull { it.toMailApp(pm) }
+    val fromMailto = listOf(
+        Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")),
+        Intent(Intent.ACTION_VIEW, Uri.parse("mailto:")),
+    ).flatMap { probe -> queryActivities(pm, probe).mapNotNull { it.toMailApp(pm) } }
+    return selectMailApps(
+        fromCategory + fromMailto + knownInstalledMailApps(pm),
+        context.packageName,
+    )
+}
+
+internal fun launchMailApp(context: Context, target: MailAppTarget) {
+    val launch = context.packageManager.getLaunchIntentForPackage(target.packageName)
+        ?: Intent(Intent.ACTION_MAIN).apply {
             component = ComponentName(target.packageName, target.activityName)
+            addCategory(Intent.CATEGORY_LAUNCHER)
         }
-    }
-    val launch = when {
-        intents.isEmpty() -> Intent.createChooser(
-            Intent(Intent.ACTION_VIEW, Uri.parse("mailto:")),
-            "Choose email app",
-        )
-        intents.size == 1 -> Intent.createChooser(intents[0], "Choose email app")
-        else -> Intent.createChooser(intents[0], "Choose email app").apply {
-            putExtra(Intent.EXTRA_INITIAL_INTENTS, intents.drop(1).toTypedArray())
-        }
-    }
+    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(launch) }
 }
 
-private fun discoverMailApps(context: Context): List<MailAppTarget> {
-    val pm = context.packageManager
-    val email = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_EMAIL)
-    val fromCategory = queryActivities(pm, email).mapNotNull { it.toMailApp(pm) }
-    if (fromCategory.isNotEmpty()) return fromCategory
-    val mailto = Intent(Intent.ACTION_VIEW, Uri.parse("mailto:"))
-    return queryActivities(pm, mailto)
-        .mapNotNull { it.toMailApp(pm) }
-        .filterNot { it.packageName in browserPackages }
+private fun knownInstalledMailApps(pm: PackageManager): List<MailAppTarget> {
+    val out = ArrayList<MailAppTarget>()
+    for (pkg in knownMailPackages) {
+        val launch = runCatching { pm.getLaunchIntentForPackage(pkg) }.getOrNull() ?: continue
+        val component = launch.component ?: continue
+        val label = runCatching {
+            pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+        }.getOrDefault(pkg).trim().ifBlank { pkg }
+        out += MailAppTarget(pkg, component.className, label)
+    }
+    return out
 }
 
 private fun queryActivities(pm: PackageManager, intent: Intent): List<ResolveInfo> {
@@ -100,4 +133,23 @@ private val browserPackages = setOf(
     "org.mozilla.firefox_beta",
     "com.brave.browser",
     "com.opera.browser",
+)
+
+/**
+ * Packages that often do not register as the system email app, so a query for
+ * the default email category returns only Gmail. Declared in the manifest
+ * queries block so Android 11+ lets us see them.
+ */
+private val knownMailPackages = listOf(
+    "com.google.android.gm",
+    "com.microsoft.office.outlook",
+    "com.samsung.android.email.provider",
+    "com.yahoo.mobile.client.android.mail",
+    "com.fsck.k9",
+    "ch.protonmail.android",
+    "com.readdle.spark",
+    "me.bluemail.mail",
+    "org.kman.AquaMail",
+    "com.easilydo.mail",
+    "com.android.email",
 )

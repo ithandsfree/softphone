@@ -32,6 +32,21 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="mailto" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+        <package android:name="com.google.android.gm" />
+        <package android:name="com.microsoft.office.outlook" />
+        <package android:name="com.samsung.android.email.provider" />
+        <package android:name="com.yahoo.mobile.client.android.mail" />
+        <package android:name="com.fsck.k9" />
+        <package android:name="ch.protonmail.android" />
+        <package android:name="com.readdle.spark" />
+        <package android:name="me.bluemail.mail" />
+        <package android:name="org.kman.AquaMail" />
+        <package android:name="com.easilydo.mail" />
+        <package android:name="com.android.email" />
     </queries>
 
     <application
