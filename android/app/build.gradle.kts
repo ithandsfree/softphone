@@ -28,11 +28,11 @@ val hasReleaseSigning = listOf(releaseStorePath, releaseStorePass, releaseKeyAli
 
 android {
     namespace = "net.ithandsfree.softphone"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 24
         versionName = "0.3.12"
         // HTTPS enrol app-link host. Override per deployment; this tree ships a placeholder.

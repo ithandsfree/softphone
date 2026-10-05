@@ -21,13 +21,14 @@ Privacy policy and GPL are separate. Google Play requires the privacy URL. GPL-2
 - [ ] PJSIP used under GPL (this repo), not a closed Teluu build
 - [ ] No live hostnames, mailboxes, or extensions in the source that is tagged for the build
 - [ ] `community` build leaves the PBX URL and SIP domain empty
-- [ ] IHF listing privacy policy URL, for the Play Console: https://ithandsfree.com/privacy
-      Live once the website zip is deployed. This is not a GPL requirement.
-- [ ] IHF in-app Privacy row and Data safety deletion link: https://ithandsfree.com/privacy#ihf-phone
+- [x] IHF listing privacy policy URL, for the Play Console: https://ithandsfree.com/privacy
+      Live as of 2026-10-05, including the `ihf-phone` section. This is not a GPL requirement.
+- [x] IHF in-app Privacy row and Data safety deletion link: https://ithandsfree.com/privacy#ihf-phone
       The `ihf` flavor opens this from Settings. The `community` flavor hides that row.
 - [ ] Community listing privacy policy URL. Do not reuse the IHF policy.
 - [ ] Data safety form: encrypted on-device credentials, BFF token, optional contacts
-- [ ] Target API level matches current Play requirements
+- [x] Target API level matches current Play requirements.
+      A new app submitted after 31 August 2026 must target Android 16 (API 36). `compileSdk` and `targetSdk` are 36.
 - [ ] Closed testing track first; production and any charge come later
 
 ## Not in this release

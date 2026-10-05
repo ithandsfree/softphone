@@ -13,7 +13,7 @@ object LegalLinks {
 
     /**
      * In-app Privacy row, and the Play Data safety deletion link.
-     * Live once the website zip that adds the IHF Phone section is deployed.
+     * The page is live and contains id="ihf-phone".
      */
     const val PRIVACY_SECTION = "https://ithandsfree.com/privacy#ihf-phone"
 
