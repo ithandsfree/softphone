@@ -6,8 +6,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.TextView
 import java.util.Locale
 
 /**
@@ -54,13 +59,35 @@ fun openMailAppChooser(context: Context) {
         }
         return
     }
+    val iconSize = (40 * context.resources.displayMetrics.density).toInt()
+    val gap = (16 * context.resources.displayMetrics.density).toInt()
+    val adapter = object : ArrayAdapter<MailAppTarget>(
+        context,
+        android.R.layout.select_dialog_item,
+        android.R.id.text1,
+        apps,
+    ) {
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = super.getView(position, convertView, parent) as TextView
+            val app = getItem(position) ?: return view
+            view.text = app.label
+            view.compoundDrawablePadding = gap
+            view.setCompoundDrawablesRelative(appIcon(context, app.packageName, iconSize), null, null, null)
+            return view
+        }
+    }
     AlertDialog.Builder(context)
         .setTitle("Choose email app")
-        .setItems(apps.map { it.label }.toTypedArray()) { _, which ->
-            launchMailApp(context, apps[which])
-        }
+        .setAdapter(adapter) { _, which -> launchMailApp(context, apps[which]) }
         .setNegativeButton("Cancel", null)
         .show()
+}
+
+private fun appIcon(context: Context, packageName: String, sizePx: Int): Drawable? {
+    val raw = runCatching { context.packageManager.getApplicationIcon(packageName) }.getOrNull() ?: return null
+    val icon = raw.mutate()
+    icon.setBounds(0, 0, sizePx, sizePx)
+    return icon
 }
 
 internal fun mailAppsOnDevice(context: Context): List<MailAppTarget> {
