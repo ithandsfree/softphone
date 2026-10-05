@@ -1,6 +1,9 @@
 <?php
 /**
- * Plain-text welcome / enrol email via local postfix (sendmail).
+ * Welcome / enrol email via local postfix (sendmail).
+ *
+ * The message clients see is HTML: a button, not the raw setup URL.
+ * A plain-text part is included for mail apps that do not show HTML.
  *
  * From / Reply-To / envelope (-f) use config.php mail_from.
  * Example: notify@pbx.example.com
@@ -23,40 +26,65 @@ class WelcomeMailer {
 			return ['ok' => false, 'error' => 'invalid_email'];
 		}
 
+		$rendered = $this->render($payload);
+		$ok = $this->sendRaw($to, $rendered['subject'], $rendered['text'], $rendered['html']);
+		if (!$ok) {
+			return ['ok' => false, 'error' => 'sendmail_failed', 'to' => $to, 'subject' => $rendered['subject']];
+		}
+		return ['ok' => true, 'to' => $to, 'subject' => $rendered['subject']];
+	}
+
+	/**
+	 * @return array{subject:string,text:string,html:string}
+	 */
+	public function render(array $payload): array {
 		$ext = (string)($payload['extension'] ?? '');
-		$label = (string)($payload['label'] ?? ("ext $ext"));
+		$label = (string)($payload['label'] ?? ($ext !== '' ? "ext $ext" : 'your line'));
 		$enrol = (string)($payload['enrol_url'] ?? '');
 		$install = (string)($payload['install_url'] ?? '');
 		$expires = (string)($payload['expires_iso'] ?? '');
 		$did = (string)($payload['did'] ?? '');
-		$deep = (string)($payload['deep_link'] ?? '');
 		$extraLines = is_array($payload['extra_lines'] ?? null) ? $payload['extra_lines'] : [];
 
-		$subject = $this->fromName . " — Set up $label";
-		$body = $this->buildBody($label, $ext, $did, $enrol, $deep, $install, $expires, $extraLines);
-
-		$ok = $this->sendRaw($to, $subject, $body);
-		if (!$ok) {
-			return ['ok' => false, 'error' => 'sendmail_failed', 'to' => $to, 'subject' => $subject];
-		}
-		return ['ok' => true, 'to' => $to, 'subject' => $subject];
+		return [
+			'subject' => $this->fromName . " — Set up $label",
+			'text' => $this->buildText($label, $ext, $did, $enrol, $install, $expires, $extraLines),
+			'html' => $this->buildHtml($label, $ext, $did, $enrol, $install, $expires, $extraLines),
+		];
 	}
 
-	private function buildBody(
+	private function buildText(
 		string $label,
 		string $ext,
 		string $did,
 		string $enrol,
-		string $deep,
 		string $install,
 		string $expires,
-		array $extraLines = []
+		array $extraLines
 	): string {
-		$didLine = $did !== '' ? "DID: +$did\n" : '';
-		$expLine = $expires !== '' ? "This setup link works once and expires: $expires UTC\n" : '';
-		$extraBlock = '';
+		$name = $this->fromName;
+		$lines = [];
+		$lines[] = "$name";
+		$lines[] = '';
+		$lines[] = "Your phone line is ready ($label).";
+		$lines[] = 'Open this email on your phone and tap Set up your phone.';
+		$lines[] = '';
+		if ($ext !== '') {
+			$lines[] = "Extension: $ext";
+		}
+		if ($did !== '') {
+			$lines[] = "Number: +$did";
+		}
+		$when = $this->friendlyExpiry($expires);
+		if ($when !== '') {
+			$lines[] = "This button works once, until $when.";
+		}
+		$lines[] = '';
+		$lines[] = 'If you do not see the button, open this link:';
+		$lines[] = $enrol;
 		if ($extraLines !== []) {
-			$lines = [];
+			$lines[] = '';
+			$lines[] = 'Other lines on this account:';
 			foreach ($extraLines as $row) {
 				if (!is_array($row)) {
 					continue;
@@ -67,56 +95,155 @@ class WelcomeMailer {
 				}
 				$elabel = trim((string)($row['label'] ?? ''));
 				$eext = trim((string)($row['extension'] ?? ''));
-				$edid = trim((string)($row['did'] ?? ''));
-				$name = $elabel !== '' ? $elabel : ($eext !== '' ? "ext $eext" : 'another line');
-				$didBit = $edid !== '' ? " (DID +$edid)" : '';
-				$lines[] = "- $name$didBit\n  $url";
-			}
-			if ($lines !== []) {
-				$extraBlock = "\nAdditional line(s) on this account — open on the same phone to add a second line:\n"
-					. implode("\n", $lines) . "\n";
+				$title = $elabel !== '' ? $elabel : ($eext !== '' ? "ext $eext" : 'another line');
+				$lines[] = "Set up $title: $url";
 			}
 		}
-		$name = $this->fromName;
-		return <<<TXT
-$name — setup link ($label)
-
-Open this email on the phone where the softphone is installed, then tap Set up:
-
-$enrol
-
-Extension: $ext
-{$didLine}{$expLine}{$extraBlock}
-Already have one line set up? Open a link again (or Lines → Add second line → Email me a setup link) to enrol your next extension — up to two per phone.
-
-No password in this email. The link opens the app when it is installed.
-
-If you still need the app:
-$install
-
-Alternate deep link: $deep
-(Or paste the token from the HTTPS page under Advanced setup → Enrol line.)
-
-— $name
-TXT;
+		$lines[] = '';
+		$lines[] = 'No password in this email.';
+		if ($install !== '') {
+			$lines[] = '';
+			$lines[] = 'Need the app first?';
+			$lines[] = $install;
+		}
+		$lines[] = '';
+		$lines[] = "— $name";
+		return implode("\n", $lines) . "\n";
 	}
 
-	private function sendRaw(string $to, string $subject, string $body): bool {
+	private function buildHtml(
+		string $label,
+		string $ext,
+		string $did,
+		string $enrol,
+		string $install,
+		string $expires,
+		array $extraLines
+	): string {
+		$name = $this->h($this->fromName);
+		$heading = $this->h($label);
+		$details = '';
+		if ($ext !== '') {
+			$details .= '<p style="margin:0 0 4px;font-size:15px;color:#3d4654;">Extension ' . $this->h($ext) . '</p>';
+		}
+		if ($did !== '') {
+			$details .= '<p style="margin:0 0 4px;font-size:15px;color:#3d4654;">Number +' . $this->h($did) . '</p>';
+		}
+		$when = $this->friendlyExpiry($expires);
+		$expiry = $when !== ''
+			? '<p style="margin:8px 0 0;font-size:13px;color:#6b7280;">Works once, until ' . $this->h($when) . '.</p>'
+			: '';
+		$primary = $this->button($enrol, 'Set up your phone');
+		$extraHtml = '';
+		foreach ($extraLines as $row) {
+			if (!is_array($row)) {
+				continue;
+			}
+			$url = trim((string)($row['enrol_url'] ?? ''));
+			if ($url === '') {
+				continue;
+			}
+			$elabel = trim((string)($row['label'] ?? ''));
+			$eext = trim((string)($row['extension'] ?? ''));
+			$title = $elabel !== '' ? $elabel : ($eext !== '' ? "ext $eext" : 'another line');
+			$extraHtml .= $this->button($url, 'Set up ' . $title, true);
+		}
+		$extraBlock = $extraHtml !== ''
+			? '<p style="margin:20px 0 0;font-size:14px;color:#3d4654;">Other lines on this account</p>' . $extraHtml
+			: '';
+		$installBlock = '';
+		if ($this->httpsHref($install) !== '') {
+			$installBlock = '<p style="margin:24px 0 0;font-size:14px;color:#6b7280;">Don\'t have the app yet?</p>'
+				. $this->button($install, 'Get the app', true);
+		}
+
+		return <<<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{$name}</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f1ea;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f1ea;">
+<tr><td align="center" style="padding:28px 16px;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:480px;background:#ffffff;border-radius:16px;">
+<tr><td style="padding:28px 28px 8px;font-family:Segoe UI,Helvetica,Arial,sans-serif;">
+<p style="margin:0 0 18px;font-size:13px;letter-spacing:0.04em;color:#8a7340;">{$name}</p>
+<h1 style="margin:0 0 8px;font-size:26px;line-height:1.25;font-weight:600;color:#1c2430;">Your phone line is ready</h1>
+<p style="margin:0 0 18px;font-size:16px;line-height:1.45;color:#3d4654;">{$heading}</p>
+{$details}
+{$primary}
+<p style="margin:0;font-size:15px;line-height:1.45;color:#3d4654;">Open this email on your phone and tap the button.</p>
+{$expiry}
+{$extraBlock}
+{$installBlock}
+<p style="margin:28px 0 8px;font-size:13px;color:#6b7280;">No password in this email.</p>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>
+HTML;
+	}
+
+	private function button(string $url, string $label, bool $secondary = false): string {
+		$href = $this->httpsHref($url);
+		if ($href === '') {
+			return '';
+		}
+		$bg = $secondary ? '#ffffff' : '#c9a227';
+		$color = '#1a1400';
+		$border = $secondary ? 'border:1px solid #d9d3c5;' : '';
+		$text = $this->h($label);
+		return '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0;">'
+			. '<tr><td bgcolor="' . $bg . '" style="border-radius:10px;' . $border . '">'
+			. '<a href="' . $href . '" style="display:inline-block;padding:14px 28px;font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;color:' . $color . ';text-decoration:none;font-weight:700;">'
+			. $text . '</a></td></tr></table>';
+	}
+
+	private function httpsHref(string $url): string {
+		$url = trim($url);
+		if (!preg_match('#^https://#i', $url) || preg_match('/[\r\n\s]/', $url)) {
+			return '';
+		}
+		return htmlspecialchars($url, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+	}
+
+	private function h(string $value): string {
+		return htmlspecialchars($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+	}
+
+	private function friendlyExpiry(string $iso): string {
+		$iso = trim($iso);
+		if ($iso === '') {
+			return '';
+		}
+		$ts = strtotime($iso);
+		if ($ts === false) {
+			return '';
+		}
+		return gmdate('M j, Y g:i A', $ts) . ' UTC';
+	}
+
+	private function sendRaw(string $to, string $subject, string $text, string $html): bool {
 		$from = $this->from;
 		$fromName = $this->fromName;
+		$boundary = 'ihf_' . bin2hex(random_bytes(12));
 		$headers = [
 			'From: ' . $this->encodeAddress($fromName, $from),
 			'Reply-To: ' . $from,
 			'MIME-Version: 1.0',
-			'Content-Type: text/plain; charset=UTF-8',
-			'Content-Transfer-Encoding: 8bit',
+			'Content-Type: multipart/alternative; boundary="' . $boundary . '"',
 			'X-Mailer: ihf-softphone-admin',
 		];
-		$envelope = 'From: ' . $from . "\n";
+		$body = $this->multipartBody($boundary, $text, $html);
 		$msg = 'To: ' . $to . "\n"
 			. 'Subject: ' . $this->encodeHeader($subject) . "\n"
 			. implode("\n", $headers) . "\n\n"
-			. $body . "\n";
+			. $body;
 
 		$descriptors = [
 			0 => ['pipe', 'r'],
@@ -126,7 +253,6 @@ TXT;
 		$cmd = '/usr/sbin/sendmail -t -i -f ' . escapeshellarg($from);
 		$proc = @proc_open($cmd, $descriptors, $pipes);
 		if (!is_resource($proc)) {
-			// Fallback: PHP mail()
 			return @mail($to, $subject, $body, implode("\r\n", $headers), '-f' . $from);
 		}
 		fwrite($pipes[0], $msg);
@@ -135,6 +261,18 @@ TXT;
 		fclose($pipes[2]);
 		$code = proc_close($proc);
 		return $code === 0;
+	}
+
+	private function multipartBody(string $boundary, string $text, string $html): string {
+		return "--$boundary\r\n"
+			. "Content-Type: text/plain; charset=UTF-8\r\n"
+			. "Content-Transfer-Encoding: 8bit\r\n\r\n"
+			. $text . "\r\n"
+			. "--$boundary\r\n"
+			. "Content-Type: text/html; charset=UTF-8\r\n"
+			. "Content-Transfer-Encoding: 8bit\r\n\r\n"
+			. $html . "\r\n"
+			. "--$boundary--\r\n";
 	}
 
 	private function encodeAddress(string $name, string $email): string {
