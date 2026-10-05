@@ -140,7 +140,7 @@ Allow the phone's network to reach:
 | SIP registration and calls | TCP 5060 | Yes, for voice |
 | RTP audio | UDP 10000–20000 (FreePBX default) | Yes, for voice |
 
-Prefer **TCP** for SIP. The app tries TCP first.
+Prefer **TCP** for SIP. The app tries TCP first. SIP TLS is included in the next build.
 
 Do not open FreePBX Admin, User Manager admin, or the softphone page `/ihf-softphone/admin/` on the public port. If you add a public HTTPS vhost, limit it to `/ihf-softphone/` and deny `/ihf-softphone/admin` and `/v1/admin/*`.
 

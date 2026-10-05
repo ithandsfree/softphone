@@ -14,14 +14,13 @@ This softphone is **GPL-2.0**. PJSIP is GPL (with a separate commercial license 
    Domain comes from the line, or `BuildConfig.DEFAULT_SIP_DOMAIN` on the `ihf` flavor.
    The `community` flavor leaves the domain blank until the user enters it.
 4. **TCP** SIP transport first (avoids UDP NAT / one-way-audio on mobile).
-   UDP is created only if TCP fails. TLS needs OpenSSL libs not shipped in this
-   PjDroid build — rebuild PJSIP with OpenSSL later for `sips:` / 5061.
+   UDP is created only if TCP fails. SIP TLS is included in the next build.
 
 ## FreePBX checklist
 
 - Extension exists under **Applications → Extensions** (PJSIP).
 - Secret matches the softphone line’s SIP password.
-- Transport matches (**TCP 5060** preferred).
+- Transport matches (**TCP 5060** preferred). SIP TLS is included in the next build.
 - Firewall allows the phone to reach the PBX.
 - Codec overlap (ulaw/alaw/g722 common).
 

@@ -95,8 +95,8 @@ class PjsipSipEngine(
                 ep.libInit(epConfig)
 
                 // Prefer TCP for SIP signalling — UDP REGISTER/INVITE through carrier
-                // NAT often yields one-way audio / stuck contacts. TLS needs OpenSSL
-                // in PjDroid (not shipped yet). Keep UDP only as last-resort fallback.
+                // NAT often yields one-way audio / stuck contacts. SIP TLS is included
+                // in the next build. Keep UDP only as last-resort fallback.
                 try {
                     val tcp = TransportConfig().apply { port = 0 }
                     tcpTransportId = ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TCP, tcp)
@@ -447,8 +447,8 @@ class PjsipSipEngine(
                 acfg.sipConfig.transportId = udpTransportId
             }
             // Optional SDES/SRTP so shared extensions with FreePBX Media Encryption
-            // (sdes) still negotiate. Secure-signaling=0 allows SRTP over TCP SIP
-            // (desk phones use TLS; softphone is still TCP-only).
+            // (sdes) still negotiate. Secure-signaling=0 allows SRTP over TCP SIP.
+            // Desk phones use TLS. SIP TLS is included in the next softphone build.
             runCatching {
                 acfg.mediaConfig.srtpUse = pjmedia_srtp_use.PJMEDIA_SRTP_OPTIONAL
                 acfg.mediaConfig.srtpSecureSignaling = 0
