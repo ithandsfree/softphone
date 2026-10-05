@@ -34,8 +34,8 @@ Privacy policy and GPL are separate. Google Play requires the privacy URL. GPL-2
 - [x] Target API level matches current Play requirements.
       A new app submitted after 31 August 2026 must target Android 16 (API 36). `compileSdk` and `targetSdk` are 36.
 - [ ] Closed testing for both apps; production and any charge come later.
-      `:app:bundleIhfRelease` for `net.ithandsfree.softphone`. The `ihf` default server in this tree is `pbx.example.com`.
-      `:app:bundleCommunityRelease` for `net.ithandsfree.softphone.community`. That flavor leaves the server blank. It needs its own privacy policy and its own upload key.
+      IHF customers: `net.ithandsfree.softphone`. Community: `net.ithandsfree.softphone.community`.
+      In this tree the `ihf` default server is the placeholder `pbx.example.com`. The community flavor leaves the server blank and needs its own privacy policy and upload key.
 
 ## Not in this release
 
