@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en" data-skin="ihf_night">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta http-equiv="Cache-Control" content="no-store"/>
+<meta name="theme-color" content="#040914"/>
+<title>IHF Phone — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap"/>
+<style>
+  /* IHF Night — mirror softphone skins-preview / IhfColors.Dark */
+  :root {
+    --ground: #040914;
+    --surface: #0B132B;
+    --raised: #142040;
+    --selected: #1F3B7D;
+    --hairline: #233052;
+    --divider: #1A2644;
+    --gold: #D4AF37;
+    --gold-ink: #0B132B;
+    --gold-dim: #9A7B1E;
+    --gold-tint: #2A2410;
+    --emerald: #35C08A;
+    --sky: #79B4F2;
+    --coral: #F2836F;
+    --text: #EEF2F8;
+    --muted: #AAB6CC;
+    --caption: #8491AD;
+    --atmosphere:
+      radial-gradient(120% 80% at 10% -10%, rgba(212, 175, 55, 0.18), transparent 55%),
+      radial-gradient(90% 70% at 100% 0%, rgba(121, 180, 242, 0.12), transparent 50%),
+      linear-gradient(165deg, #071022 0%, var(--ground) 45%, #061018 100%);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    font-family: Inter, system-ui, sans-serif;
+    color: var(--text);
+    background: var(--atmosphere);
+    background-attachment: fixed;
+    line-height: 1.45;
+  }
+  .shell {
+    max-width: 52rem;
+    margin: 0 auto;
+    padding: 1.5rem 1.15rem 3.5rem;
+  }
+  .brand-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.35rem;
+    animation: rise .55s ease both;
+  }
+  .brand-mark {
+    width: 3.35rem;
+    height: 3.35rem;
+    border-radius: 18px;
+    background:
+      radial-gradient(120% 100% at 30% 20%, #1B2D63 0%, #0B132B 55%, #040914 100%);
+    border: 1px solid var(--hairline);
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  }
+  .brand-mark img {
+    width: 2.35rem;
+    height: 2.35rem;
+    display: block;
+  }
+  .brand-copy { min-width: 0; }
+  .brand-name {
+    font-family: "Instrument Serif", Georgia, serif;
+    font-size: clamp(2rem, 5vw, 2.55rem);
+    color: var(--gold);
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+  }
+  .brand-name .product {
+    color: var(--text);
+    font-style: italic;
+  }
+  .brand-tag {
+    margin-top: .35rem;
+    color: var(--muted);
+    font-size: .95rem;
+  }
+  .skin-chip {
+    display: inline-block;
+    margin-top: .55rem;
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--caption);
+  }
+  .panel {
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    border: 1px solid var(--hairline);
+    border-radius: 16px;
+    padding: 1.05rem 1.15rem 1.15rem;
+    margin: 0 0 1rem;
+    backdrop-filter: blur(8px);
+    animation: rise .6s ease both;
+  }
+  .panel:nth-of-type(2) { animation-delay: .04s; }
+  .panel:nth-of-type(3) { animation-delay: .08s; }
+  .panel-title {
+    font-family: "Instrument Serif", Georgia, serif;
+    font-size: 1.35rem;
+    font-weight: 400;
+    margin: 0 0 .25rem;
+  }
+  label {
+    display: block;
+    font-size: .78rem;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    color: var(--caption);
+    margin: .7rem 0 .3rem;
+  }
+  input[type="text"], input[type="email"], input[type="password"], select {
+    width: 100%;
+    padding: .7rem .8rem;
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    background: var(--raised);
+    color: var(--text);
+    font: inherit;
+  }
+  input::placeholder { color: var(--caption); }
+  input:focus, select:focus {
+    outline: 2px solid color-mix(in srgb, var(--gold) 55%, transparent);
+    outline-offset: 1px;
+    border-color: var(--gold-dim);
+  }
+  select option { background: var(--surface); color: var(--text); }
+  .row { display: grid; gap: .75rem; }
+  @media (min-width: 640px) {
+    .row.two { grid-template-columns: 1fr 1fr; }
+  }
+  .check {
+    display: flex; align-items: center; gap: .55rem;
+    margin: .95rem 0 .3rem; font-weight: 500; color: var(--muted);
+  }
+  .check input { width: 1.1rem; height: 1.1rem; accent-color: var(--gold); }
+  .actions { display: flex; flex-wrap: wrap; gap: .55rem; margin-top: 1rem; }
+  button, .btn {
+    appearance: none; border: 0; cursor: pointer;
+    background: var(--gold); color: var(--gold-ink);
+    font-weight: 700; padding: .72rem 1.05rem; border-radius: 12px; font: inherit;
+    transition: transform 160ms ease, filter 160ms ease;
+  }
+  button:hover, .btn:hover { filter: brightness(1.06); transform: translateY(-1px); }
+  button.secondary, .btn.secondary {
+    background: transparent; color: var(--text); border: 1px solid var(--hairline);
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+  .msg { margin-top: .85rem; padding: .75rem .85rem; border-radius: 12px; font-size: .92rem; }
+  .msg.ok { background: color-mix(in srgb, var(--emerald) 18%, transparent); border: 1px solid var(--emerald); }
+  .msg.err { background: color-mix(in srgb, var(--coral) 16%, transparent); border: 1px solid var(--coral); }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .6rem .35rem; border-bottom: 1px solid var(--divider); vertical-align: top; }
+  th {
+    color: var(--caption); font-weight: 700; font-size: .72rem;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .84rem; word-break: break-all;
+  }
+  a { color: var(--gold); }
+  .hint { color: var(--muted); font-size: .86rem; margin: .35rem 0 0; }
+  .badge {
+    display: inline-block; font-size: .68rem; font-weight: 700;
+    padding: .18rem .5rem; border-radius: 999px; border: 1px solid var(--hairline);
+    color: var(--caption); text-transform: uppercase; letter-spacing: .06em;
+    background: color-mix(in srgb, var(--raised) 80%, transparent);
+  }
+  .whoami { font-size: .9rem; color: var(--muted); }
+  .whoami strong { color: var(--text); }
+  details.breakglass { margin-top: .85rem; }
+  details.breakglass summary { cursor: pointer; color: var(--caption); font-size: .86rem; }
+  #opsPanels[hidden], #loginPanel[hidden] { display: none !important; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .brand-bar, .panel, button, .btn { animation: none; transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <header class="brand-bar">
+      <div class="brand-mark" aria-hidden="true">
+        <img src="./ihf-emblem.svg" alt=""/>
+      </div>
+      <div class="brand-copy">
+        <div class="brand-name">IHF <span class="product">Phone</span></div>
+        <div class="brand-tag">Assign softphone lines · beta ops</div>
+        <div class="skin-chip">Admin · IHF Night</div>
+      </div>
+    </header>
+
+    <div class="panel" id="loginPanel">
+      <div class="panel-title">Operator sign-in</div>
+      <p class="hint">Primary: User Manager / UCP username + password (group <span class="mono">IHF Softphone Admins</span> or module setting <span class="mono">ihfsoftphone / ihf_softphone_admin</span>). Fallback: admin token under Emergency break-glass.</p>
+      <div class="row two">
+        <div>
+          <label for="umUser">Userman username</label>
+          <input id="umUser" type="text" autocomplete="username" placeholder="user@example.com"/>
+        </div>
+        <div>
+          <label for="umPass">Password</label>
+          <input id="umPass" type="password" autocomplete="current-password"/>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" id="btnLogin">Sign in</button>
+      </div>
+      <details class="breakglass" id="breakglassBox">
+        <summary>Emergency break-glass (admin token)</summary>
+        <label for="adminToken">Admin token</label>
+        <input id="adminToken" type="password" autocomplete="off" placeholder="from config.php admin_token"/>
+        <p class="hint">Only when <span class="mono">admin_token_fallback_enabled</span> is on. Stored in sessionStorage as <span class="mono">X-IHF-Admin-Token</span>.</p>
+        <div class="actions">
+          <button type="button" class="secondary" id="btnSaveToken">Use token</button>
+        </div>
+      </details>
+      <div id="loginFlash" hidden></div>
+    </div>
+
+    <div id="opsPanels" hidden>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+          <div class="whoami" id="whoami">Signed in</div>
+          <div class="actions" style="margin:0">
+            <button type="button" class="secondary" id="btnRefresh">Refresh catalog</button>
+            <button type="button" class="secondary" id="btnLogout">Sign out</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">Assign</div>
+        <div class="row two">
+          <div>
+            <label for="extSelect">Extension (from Userman)</label>
+            <select id="extSelect"><option value="">Loading…</option></select>
+          </div>
+          <div>
+            <label for="extManual">Or type extension</label>
+            <input id="extManual" type="text" inputmode="numeric" placeholder="1001"/>
+          </div>
+        </div>
+        <div class="row two">
+          <div>
+            <label for="username">Userman username (optional override)</label>
+            <input id="username" type="text" placeholder="user@example.com"/>
+          </div>
+          <div>
+            <label for="email">Welcome email to</label>
+            <input id="email" type="email" placeholder="user@example.com"/>
+          </div>
+        </div>
+        <label for="label">Label</label>
+        <input id="label" type="text" placeholder="ext 1001"/>
+        <label for="installUrl">Install / APK landing URL (optional — auto latest dl/)</label>
+        <input id="installUrl" type="text" placeholder="https://pbx.example.com/ihf-softphone/dl/…/"/>
+        <label class="check"><input id="sendEmail" type="checkbox" checked/> Send welcome email with install + enrol HTTPS link</label>
+        <div class="actions">
+          <button type="button" id="btnAssign">Assign softphone</button>
+          <button type="button" class="secondary" id="btnResend">Re-issue + resend email</button>
+        </div>
+        <div id="flash" hidden></div>
+      </div>
+
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+          <div class="panel-title">Assignments</div>
+          <span class="badge">no license billing</span>
+        </div>
+        <div id="assignTable" style="margin-top:.75rem;overflow-x:auto">
+          <p class="hint">Sign in to load assignments.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  var API = (function () {
+    var p = location.pathname.replace(/\/admin\/?$/, '');
+    if (!p || p === '/') p = '/ihf-softphone';
+    return p.replace(/\/$/, '') + '/index.php';
+  })();
+
+  var SESSION_KEY = 'ihf_admin_session';
+  var TOKEN_KEY = 'ihf_admin_token';
+  var authMode = null; // userman | admin_token
+
+  function sessionToken() {
+    return sessionStorage.getItem(SESSION_KEY) || '';
+  }
+  function breakglassToken() {
+    return sessionStorage.getItem(TOKEN_KEY) || document.getElementById('adminToken').value.trim();
+  }
+  function saveBreakglass() {
+    var t = document.getElementById('adminToken').value.trim();
+    if (t) sessionStorage.setItem(TOKEN_KEY, t);
+  }
+  function clearAuthStorage() {
+    sessionStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+  }
+  function flash(ok, html, target) {
+    var el = document.getElementById(target || 'flash');
+    el.hidden = false;
+    el.className = 'msg ' + (ok ? 'ok' : 'err');
+    el.innerHTML = html;
+  }
+  function setSignedIn(on, info) {
+    document.getElementById('loginPanel').hidden = !!on;
+    document.getElementById('opsPanels').hidden = !on;
+    if (on && info) {
+      var label = info.username || (info.auth === 'admin_token' ? 'break-glass token' : 'operator');
+      document.getElementById('whoami').innerHTML = 'Signed in as <strong>' + esc(label) + '</strong>'
+        + ' <span class="badge">' + esc(info.auth || authMode || 'session') + '</span>';
+    }
+  }
+  async function api(method, path, body) {
+    var opts = {
+      method: method,
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    };
+    var sess = sessionToken();
+    var tok = breakglassToken();
+    if (sess) opts.headers['X-IHF-Admin-Session'] = sess;
+    else if (tok) opts.headers['X-IHF-Admin-Token'] = tok;
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    var res = await fetch(API + path, opts);
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok) {
+      var err = data.error || ('HTTP ' + res.status);
+      var detail = data.detail ? (': ' + data.detail) : '';
+      var e = new Error(err + detail);
+      e.status = res.status;
+      e.data = data;
+      throw e;
+    }
+    return data;
+  }
+
+  var catalog = [];
+
+  function fillCatalog(rows) {
+    catalog = rows || [];
+    var sel = document.getElementById('extSelect');
+    sel.innerHTML = '<option value="">Select extension…</option>';
+    rows.forEach(function (u) {
+      (u.extensions && u.extensions.length ? u.extensions : [u.default_extension]).forEach(function (ext) {
+        if (!ext) return;
+        var opt = document.createElement('option');
+        opt.value = ext;
+        opt.textContent = ext + ' — ' + (u.displayname || u.username) + (u.email ? ' <' + u.email + '>' : '');
+        opt.dataset.username = u.username || '';
+        opt.dataset.email = u.email || '';
+        opt.dataset.label = 'ext ' + ext;
+        sel.appendChild(opt);
+      });
+    });
+  }
+
+  function applySelect() {
+    var sel = document.getElementById('extSelect');
+    var opt = sel.options[sel.selectedIndex];
+    if (!opt || !opt.value) return;
+    document.getElementById('extManual').value = opt.value;
+    document.getElementById('username').value = opt.dataset.username || '';
+    document.getElementById('email').value = opt.dataset.email || '';
+    document.getElementById('label').value = opt.dataset.label || ('ext ' + opt.value);
+  }
+
+  function renderAssignments(rows) {
+    var box = document.getElementById('assignTable');
+    if (!rows || !rows.length) {
+      box.innerHTML = '<p class="hint">No assignments yet.</p>';
+      return;
+    }
+    var html = '<table><thead><tr><th>Ext</th><th>User / email</th><th>Enrol</th><th>Email</th><th></th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      var emailed = r.email_sent_at
+        ? ('sent ' + new Date(r.email_sent_at * 1000).toISOString())
+        : '—';
+      html += '<tr>'
+        + '<td><strong>' + esc(r.extension) + '</strong><br><span class="hint">' + esc(r.label || '') + '</span></td>'
+        + '<td class="mono">' + esc(r.username || '') + '<br>' + esc(r.email || '') + '</td>'
+        + '<td><a href="' + esc(r.enrol_url) + '" target="_blank" rel="noopener">enrol link</a>'
+        + '<div class="hint">exp ' + esc(r.token_exp_iso || '') + '</div></td>'
+        + '<td class="hint">' + esc(emailed) + '</td>'
+        + '<td><button type="button" class="secondary btn-resend-row" data-ext="' + esc(r.extension) + '">Resend</button></td>'
+        + '</tr>';
+    });
+    html += '</tbody></table>';
+    box.innerHTML = html;
+    box.querySelectorAll('.btn-resend-row').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        document.getElementById('extManual').value = btn.dataset.ext;
+        document.getElementById('sendEmail').checked = true;
+        resend();
+      });
+    });
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  async function refresh() {
+    var cat = await api('GET', '/v1/admin/catalog');
+    fillCatalog(cat.users || []);
+    var asg = await api('GET', '/v1/admin/assignments');
+    renderAssignments(asg.assignments || []);
+  }
+
+  async function assign() {
+    var ext = document.getElementById('extManual').value.trim() || document.getElementById('extSelect').value.trim();
+    var body = {
+      extension: ext,
+      username: document.getElementById('username').value.trim() || undefined,
+      email: document.getElementById('email').value.trim() || undefined,
+      label: document.getElementById('label').value.trim() || undefined,
+      install_url: document.getElementById('installUrl').value.trim() || undefined,
+      send_email: document.getElementById('sendEmail').checked
+    };
+    var data = await api('POST', '/v1/admin/assign', body);
+    var a = data.assignment || {};
+    var mail = data.email;
+    var mailLine = mail
+      ? (mail.ok ? ('Email sent to ' + esc(mail.to)) : ('Email failed: ' + esc(mail.error || 'unknown')))
+      : 'Email not requested';
+    flash(true, '<strong>Assigned ' + esc(a.extension) + '</strong><br>'
+      + 'Enrol: <a href="' + esc(a.enrol_url) + '" target="_blank" rel="noopener">' + esc(a.enrol_url) + '</a><br>'
+      + 'Install: <a href="' + esc(a.install_url) + '" target="_blank" rel="noopener">' + esc(a.install_url) + '</a><br>'
+      + mailLine);
+    await refresh();
+  }
+
+  async function resend() {
+    var ext = document.getElementById('extManual').value.trim() || document.getElementById('extSelect').value.trim();
+    var data = await api('POST', '/v1/admin/welcome-email', {
+      extension: ext,
+      email: document.getElementById('email').value.trim() || undefined
+    });
+    var a = data.assignment || {};
+    var mail = data.email || {};
+    flash(!!mail.ok, (mail.ok ? 'Welcome email sent to ' : 'Email failed for ')
+      + esc(mail.to || a.email || '')
+      + (mail.ok ? '' : (': ' + esc(mail.error || data.error || '')))
+      + '<br>Enrol: <a href="' + esc(a.enrol_url) + '" target="_blank" rel="noopener">' + esc(a.enrol_url) + '</a>');
+    await refresh();
+  }
+
+  async function login() {
+    var data = await api('POST', '/v1/admin/login', {
+      username: document.getElementById('umUser').value.trim(),
+      password: document.getElementById('umPass').value
+    });
+    if (data.token) sessionStorage.setItem(SESSION_KEY, data.token);
+    sessionStorage.removeItem(TOKEN_KEY);
+    authMode = 'userman';
+    document.getElementById('umPass').value = '';
+    setSignedIn(true, { username: (data.user && data.user.username) || '', auth: 'userman' });
+    await refresh();
+  }
+
+  async function logout() {
+    try { await api('POST', '/v1/admin/logout'); } catch (e) { /* ignore */ }
+    clearAuthStorage();
+    authMode = null;
+    setSignedIn(false);
+    flash(true, 'Signed out.', 'loginFlash');
+  }
+
+  async function bootstrap() {
+    document.getElementById('adminToken').value = sessionStorage.getItem(TOKEN_KEY) || '';
+    try {
+      var me = await api('GET', '/v1/admin/me');
+      authMode = me.auth || (sessionToken() ? 'userman' : 'admin_token');
+      if (me.token_fallback === false) {
+        document.getElementById('breakglassBox').hidden = true;
+      }
+      setSignedIn(true, { username: (me.user && me.user.username) || '', auth: authMode });
+      await refresh();
+    } catch (e) {
+      setSignedIn(false);
+      if (e.data && e.data.token_fallback === false) {
+        document.getElementById('breakglassBox').hidden = true;
+      }
+    }
+  }
+
+  document.getElementById('btnLogin').addEventListener('click', function () {
+    login().catch(function (e) { flash(false, esc(e.message), 'loginFlash'); });
+  });
+  document.getElementById('umPass').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') document.getElementById('btnLogin').click();
+  });
+  document.getElementById('btnSaveToken').addEventListener('click', function () {
+    saveBreakglass();
+    if (!breakglassToken()) {
+      flash(false, 'Paste admin_token first.', 'loginFlash');
+      return;
+    }
+    sessionStorage.removeItem(SESSION_KEY);
+    authMode = 'admin_token';
+    setSignedIn(true, { username: 'admin_token', auth: 'admin_token' });
+    refresh().catch(function (e) {
+      setSignedIn(false);
+      flash(false, esc(e.message), 'loginFlash');
+    });
+  });
+  document.getElementById('btnRefresh').addEventListener('click', function () {
+    refresh().catch(function (e) { flash(false, esc(e.message)); });
+  });
+  document.getElementById('btnLogout').addEventListener('click', function () {
+    logout().catch(function (e) { flash(false, esc(e.message), 'loginFlash'); });
+  });
+  document.getElementById('btnAssign').addEventListener('click', function () {
+    assign().catch(function (e) { flash(false, esc(e.message)); });
+  });
+  document.getElementById('btnResend').addEventListener('click', function () {
+    resend().catch(function (e) { flash(false, esc(e.message)); });
+  });
+  document.getElementById('extSelect').addEventListener('change', applySelect);
+
+  bootstrap();
+})();
+</script>
+</body>
+</html>

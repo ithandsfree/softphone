@@ -1,0 +1,10 @@
+# Allow PATH_INFO style routing: /ihf-softphone/index.php/v1/...
+# Skip real files AND directories so static landings under dl/ and enrol/
+# are not rewritten into the BFF (which returns 401 unauthorized).
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^ index.php [QSA,L]
+</IfModule>
+DirectoryIndex index.html index.php

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.IhfSoftphone" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#040914</item>
+        <item name="android:navigationBarColor">#0B132B</item>
+        <item name="android:windowBackground">#040914</item>
+        <item name="android:colorPrimary">#D4AF37</item>
+    </style>
+</resources>

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en" data-skin="ihf_night">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Softphone skins preview</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap">
+  <link rel="stylesheet" href="./skins.css">
+</head>
+<body>
+  <div class="page">
+    <aside class="panel">
+      <h1>Softphone skins</h1>
+      <p class="lede">
+        Token packs shared with the Android app. Switch at runtime — no forked
+        builds per brand.
+      </p>
+      <div class="skin-list" role="listbox" aria-label="Skin packs">
+        <button type="button" class="skin-btn" data-id="ihf_night" aria-pressed="true">
+          <strong>IHF Night</strong>
+          <span>Navy ground, gold actions — default IHF brand</span>
+        </button>
+        <button type="button" class="skin-btn" data-id="carbon_signal" aria-pressed="false">
+          <strong>Carbon Signal</strong>
+          <span>Charcoal ground, copper actions — alternate brand pack</span>
+        </button>
+        <button type="button" class="skin-btn" data-id="ihf_mist" aria-pressed="false">
+          <strong>IHF Mist</strong>
+          <span>Cool mist surfaces, ink type — light brand pack</span>
+        </button>
+      </div>
+      <p class="hint">
+        App path: Settings → Skin → Appearance.<br>
+        Tenant default: BFF <code>default_skin</code> or
+        <code>BuildConfig.DEFAULT_SKIN_ID</code>.
+      </p>
+    </aside>
+
+    <main class="stage">
+      <div class="phone" id="phone">
+        <div class="phone-top">
+          <div class="brand" id="brand">IHF</div>
+          <div class="product" id="product">Phone</div>
+          <div class="tagline" id="tagline">Business lines on your phone</div>
+          <div class="skin-chip" id="skinChip">IHF Night</div>
+        </div>
+        <div class="phone-body">
+          <div class="line-dots" aria-hidden="true">
+            <span class="dot l1"></span>
+            <span class="dot l2"></span>
+            <span class="dot err"></span>
+          </div>
+          <div class="row">
+            <div class="avatar">AE</div>
+            <div class="meta">
+              <div class="name">Alex Example</div>
+              <div class="sub">+1 555 555 0100</div>
+            </div>
+            <div class="pill">Active</div>
+          </div>
+          <div class="row">
+            <div class="avatar">PE</div>
+            <div class="meta">
+              <div class="name">Pat Example</div>
+              <div class="sub">+1 555 555 0199</div>
+            </div>
+            <div class="pill">Line 2</div>
+          </div>
+          <div class="actions">
+            <button type="button" class="btn btn-primary">Call</button>
+            <button type="button" class="btn btn-secondary">Message</button>
+          </div>
+          <nav class="nav" aria-label="Bottom tabs">
+            <span>Calls</span>
+            <span class="active">Messages</span>
+            <span>Lines</span>
+            <span>Settings</span>
+          </nav>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const copy = {
+      ihf_night: { brand: "IHF", product: "Phone", tagline: "Business lines on your phone", label: "IHF Night" },
+      carbon_signal: { brand: "SIGNAL", product: "Desk", tagline: "Lines that stay with you", label: "Carbon Signal" },
+      ihf_mist: { brand: "IHF", product: "Phone", tagline: "Business lines on your phone", label: "IHF Mist" },
+    };
+
+    function applySkin(id) {
+      document.documentElement.dataset.skin = id;
+      const c = copy[id] || copy.ihf_night;
+      document.getElementById("brand").textContent = c.brand;
+      document.getElementById("product").textContent = c.product;
+      document.getElementById("tagline").textContent = c.tagline;
+      document.getElementById("skinChip").textContent = c.label;
+      document.querySelectorAll(".skin-btn").forEach((btn) => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.id === id));
+      });
+      history.replaceState(null, "", "#" + id);
+    }
+
+    document.querySelectorAll(".skin-btn").forEach((btn) => {
+      btn.addEventListener("click", () => applySkin(btn.dataset.id));
+    });
+
+    const fromHash = (location.hash || "").replace(/^#/, "");
+    applySkin(copy[fromHash] ? fromHash : "ihf_night");
+  </script>
+</body>
+</html>

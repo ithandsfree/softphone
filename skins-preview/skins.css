@@ -1,0 +1,338 @@
+/* Softphone skin packs — mirror SoftphoneSkins / IhfColors token names.
+   Switch by setting data-skin on <html>. */
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+}
+
+:root,
+[data-skin="ihf_night"] {
+  --ground: #040914;
+  --surface: #0B132B;
+  --raised: #142040;
+  --selected: #1F3B7D;
+  --hairline: #233052;
+  --divider: #1A2644;
+  --rail-active-bg: #0F2238;
+  --gold: #D4AF37;
+  --gold-ink: #0B132B;
+  --gold-dim: #9A7B1E;
+  --gold-tint: #2A2410;
+  --emerald: #35C08A;
+  --sky: #79B4F2;
+  --coral: #F2836F;
+  --coral-ink: #040914;
+  --text: #EEF2F8;
+  --muted: #AAB6CC;
+  --caption: #8491AD;
+  --disabled: #6B7896;
+  --brand-mark: "IHF";
+  --product-name: "Phone";
+  --tagline: "Business lines on your phone";
+  --skin-label: "IHF Night";
+  --atmosphere:
+    radial-gradient(120% 80% at 10% -10%, rgba(212, 175, 55, 0.18), transparent 55%),
+    radial-gradient(90% 70% at 100% 0%, rgba(121, 180, 242, 0.12), transparent 50%),
+    linear-gradient(165deg, #071022 0%, var(--ground) 45%, #061018 100%);
+}
+
+[data-skin="carbon_signal"] {
+  --ground: #0A0E12;
+  --surface: #141A22;
+  --raised: #1C2530;
+  --selected: #2A3A48;
+  --hairline: #2E3A48;
+  --divider: #1E2833;
+  --rail-active-bg: #162028;
+  --gold: #C47A3A;
+  --gold-ink: #0A0E12;
+  --gold-dim: #8F5528;
+  --gold-tint: #2A1C12;
+  --emerald: #3DB8A0;
+  --sky: #6B9BC3;
+  --coral: #E07A62;
+  --coral-ink: #0A0E12;
+  --text: #E8EEF4;
+  --muted: #A3B0BE;
+  --caption: #7E8C9C;
+  --disabled: #5F6C7A;
+  --brand-mark: "SIGNAL";
+  --product-name: "Desk";
+  --tagline: "Lines that stay with you";
+  --skin-label: "Carbon Signal";
+  --atmosphere:
+    radial-gradient(110% 70% at 0% 0%, rgba(196, 122, 58, 0.22), transparent 50%),
+    radial-gradient(80% 60% at 100% 10%, rgba(61, 184, 160, 0.12), transparent 45%),
+    linear-gradient(160deg, #10161C 0%, var(--ground) 50%, #070A0D 100%);
+}
+
+[data-skin="ihf_mist"] {
+  --ground: #F3F5F9;
+  --surface: #FFFFFF;
+  --raised: #E6EAF2;
+  --selected: #DCE6F7;
+  --hairline: #CBD3E3;
+  --divider: #E6EAF2;
+  --rail-active-bg: #EAF0FA;
+  --gold: #B8931F;
+  --gold-ink: #0B132B;
+  --gold-dim: #8A6E14;
+  --gold-tint: #F7F0D6;
+  --emerald: #1E8F63;
+  --sky: #2F6FBF;
+  --coral: #C8452B;
+  --coral-ink: #FFFFFF;
+  --text: #0B132B;
+  --muted: #3A4A6E;
+  --caption: #5B6A8A;
+  --disabled: #8491AD;
+  --brand-mark: "IHF";
+  --product-name: "Phone";
+  --tagline: "Business lines on your phone";
+  --skin-label: "IHF Mist";
+  --atmosphere:
+    radial-gradient(100% 80% at 20% -20%, rgba(184, 147, 31, 0.16), transparent 55%),
+    radial-gradient(90% 70% at 100% 0%, rgba(47, 111, 191, 0.10), transparent 50%),
+    linear-gradient(180deg, #EEF2F8 0%, var(--ground) 40%, #E8ECF4 100%);
+}
+
+body {
+  font-family: Inter, system-ui, sans-serif;
+  color: var(--text);
+  background: #1a1f28;
+  min-height: 100vh;
+}
+
+.page {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) 1fr;
+  gap: 32px;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 64px;
+}
+
+@media (max-width: 840px) {
+  .page { grid-template-columns: 1fr; }
+}
+
+.panel h1 {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 36px;
+  font-weight: 400;
+  margin: 0 0 8px;
+  color: #f2f5fa;
+}
+
+.panel .lede {
+  color: #9aa6b8;
+  line-height: 1.45;
+  margin: 0 0 24px;
+}
+
+.skin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skin-btn {
+  text-align: left;
+  border: 1px solid #2e3a48;
+  background: #141a22;
+  color: #e8eef4;
+  border-radius: 14px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 180ms ease, transform 180ms ease;
+}
+
+.skin-btn:hover { transform: translateY(-1px); }
+.skin-btn[aria-pressed="true"] {
+  border-color: #c47a3a;
+  box-shadow: inset 0 0 0 1px rgba(196, 122, 58, 0.35);
+}
+
+.skin-btn strong {
+  display: block;
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.skin-btn span {
+  display: block;
+  font-size: 12px;
+  color: #7e8c9c;
+}
+
+.hint {
+  margin-top: 20px;
+  font-size: 12px;
+  color: #7e8c9c;
+  line-height: 1.4;
+}
+
+.hint code {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: #c9d3e0;
+}
+
+.stage {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.phone {
+  width: 360px;
+  max-width: 100%;
+  border-radius: 28px;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  background: var(--atmosphere);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.phone-top {
+  padding: 28px 20px 16px;
+  border-bottom: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.brand {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 40px;
+  color: var(--gold);
+  line-height: 1.05;
+}
+
+.product {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 26px;
+  margin-top: 4px;
+}
+
+.tagline {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.skin-chip {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--caption);
+}
+
+.phone-body { padding: 16px 16px 20px; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  margin-bottom: 10px;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--gold);
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+}
+
+.row .meta { flex: 1; min-width: 0; }
+.row .name { font-weight: 600; font-size: 15px; }
+.row .sub {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--caption);
+  margin-top: 2px;
+}
+
+.pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--gold-tint);
+  color: var(--gold);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.btn {
+  border: 0;
+  border-radius: 12px;
+  min-height: 48px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: default;
+}
+
+.btn-primary { background: var(--gold); color: var(--gold-ink); }
+.btn-secondary {
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+}
+
+.nav {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin-top: 16px;
+  padding: 10px 8px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+}
+
+.nav span {
+  text-align: center;
+  font-size: 11px;
+  color: var(--caption);
+  padding: 8px 0;
+}
+
+.nav span.active {
+  color: var(--gold);
+  font-weight: 600;
+  background: var(--gold-tint);
+  border-radius: 10px;
+}
+
+.line-dots {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0 4px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+.dot.l1 { background: var(--emerald); }
+.dot.l2 { background: var(--sky); }
+.dot.err { background: var(--coral); }

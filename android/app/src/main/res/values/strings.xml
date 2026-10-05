@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="message_sync_title">Message sync</string>
+    <string name="message_sync_body">Checking for new SMS/MMS in the background</string>
+    <string name="sip_reg_title">Voice ready</string>
+    <string name="sip_reg_body">Keeping softphone registered for calls</string>
+    <string name="incoming_call_title">Incoming call</string>
+    <string name="incoming_call_answer">Answer</string>
+    <string name="incoming_call_decline">Decline</string>
+    <string name="sip_fgs_failed_snack">Could not keep voice registered in the background. Check app settings (notifications / battery).</string>
+    <string name="sip_fgs_failed_action">Settings</string>
+</resources>

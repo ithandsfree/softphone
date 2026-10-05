@@ -1,0 +1,18 @@
+# Built artifacts
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.idea/
+.cxx/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Release signing (keystore + passwords stay off git)
+keystore.properties
+*.jks
+*.keystore
