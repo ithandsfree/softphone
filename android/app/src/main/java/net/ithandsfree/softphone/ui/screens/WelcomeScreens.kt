@@ -1,7 +1,6 @@
 package net.ithandsfree.softphone.ui.screens
 
 import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -85,6 +84,7 @@ import net.ithandsfree.softphone.R
 import net.ithandsfree.softphone.data.looksLikeEnrolToken
 import net.ithandsfree.softphone.data.normalizeEnrolToken
 import net.ithandsfree.softphone.ui.SoftphoneViewModel
+import net.ithandsfree.softphone.ui.openMailAppChooser
 import net.ithandsfree.softphone.ui.theme.IhfThemeAccess
 import net.ithandsfree.softphone.ui.theme.InstrumentSerifFamily
 import net.ithandsfree.softphone.ui.theme.LocalIhfType
@@ -479,21 +479,7 @@ fun WelcomeLinkSentScreen(
                 }
             }
             Button(
-                onClick = {
-                    val intent = Intent(Intent.ACTION_MAIN).apply {
-                        addCategory(Intent.CATEGORY_APP_EMAIL)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    runCatching { context.startActivity(intent) }.onFailure {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse("mailto:")).addFlags(
-                                    Intent.FLAG_ACTIVITY_NEW_TASK,
-                                ),
-                            )
-                        }
-                    }
-                },
+                onClick = { openMailAppChooser(context) },
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 shape = FieldShape,
                 colors = ButtonDefaults.buttonColors(
@@ -503,7 +489,7 @@ fun WelcomeLinkSentScreen(
             ) {
                 Icon(Icons.Filled.Email, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Open email app", style = type.heading.copy(fontWeight = FontWeight.SemiBold))
+                Text("Choose email app", style = type.heading.copy(fontWeight = FontWeight.SemiBold))
             }
             Row(
                 Modifier.fillMaxWidth(),
