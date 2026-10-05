@@ -6,7 +6,7 @@ Voice registers with PJSIP. SMS and MMS go through the FreePBX SMS Connector, no
 
 License: **GPL-2.0**. See [LICENSE](LICENSE). The store listing source link is this repository. The Play privacy policy is a different URL, recorded in [docs/PLAY.md](docs/PLAY.md).
 
-Google Play gets the Android app only. This repository posts both the app (`android/`) and the BFF (`api/`).
+Google Play gets two softphone apps from `android/`: IHF Phone (`net.ithandsfree.softphone`) and Community Softphone (`net.ithandsfree.softphone.community`). This repository also posts the BFF (`api/`). The BFF is not a Play upload.
 
 ## Support
 

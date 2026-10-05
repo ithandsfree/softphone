@@ -4,7 +4,7 @@ Voice uses **PJSIP PJSUA2** (packaged for Android via [PjDroid](https://github.c
 
 ## License
 
-This softphone is **GPL-2.0**. PJSIP is GPL (with a separate commercial license from Teluu). The Play listing ships this client under GPL-2.0. Corresponding source is this repository. Play receives the Android app only. The BFF in `api/` is installed on the PBX and is not a Play upload.
+This softphone is **GPL-2.0**. PJSIP is GPL (with a separate commercial license from Teluu). Both Play listings ship this client under GPL-2.0: IHF Phone and Community Softphone. Corresponding source is this repository. The BFF in `api/` is installed on the PBX and is not a Play upload.
 
 ## Wiring
 

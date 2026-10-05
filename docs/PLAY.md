@@ -2,7 +2,9 @@
 
 Not a store submission. This is the order of operations once a flavor is ready to leave sideload.
 
-Play receives the Android softphone only. This repository also contains the BFF (`api/`). The BFF is installed on the FreePBX host. It is not uploaded to Play.
+Play receives two softphone apps. This repository also contains the BFF (`api/`). The BFF is installed on the FreePBX host. It is not uploaded to Play.
+
+Already in this repo: GPL-2.0 source, the FreePBX 17+ install guide, and the two application ids below.
 
 ## Two listings
 
@@ -31,8 +33,9 @@ Privacy policy and GPL are separate. Google Play requires the privacy URL. GPL-2
 - [ ] Data safety form: encrypted on-device credentials, BFF token, optional contacts
 - [x] Target API level matches current Play requirements.
       A new app submitted after 31 August 2026 must target Android 16 (API 36). `compileSdk` and `targetSdk` are 36.
-- [ ] Closed testing track first; production and any charge come later.
-      Upload `:app:bundleIhfRelease` for `net.ithandsfree.softphone`. The `ihf` default server in this tree is `pbx.example.com`.
+- [ ] Closed testing for both apps; production and any charge come later.
+      `:app:bundleIhfRelease` for `net.ithandsfree.softphone`. The `ihf` default server in this tree is `pbx.example.com`.
+      `:app:bundleCommunityRelease` for `net.ithandsfree.softphone.community`. That flavor leaves the server blank. It needs its own privacy policy and its own upload key.
 
 ## Not in this release
 
