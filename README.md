@@ -6,6 +6,8 @@ Voice registers with PJSIP. SMS and MMS go through the FreePBX SMS Connector, no
 
 License: **GPL-2.0**. See [LICENSE](LICENSE). The store listing source link is this repository. The Play privacy policy is a different URL, recorded in [docs/PLAY.md](docs/PLAY.md).
 
+Google Play gets the Android app only. This repository posts both the app (`android/`) and the BFF (`api/`).
+
 ## Support
 
 **FreePBX 17 and later**, with PJSIP, User Manager, and the FreePBX SMS Connector.

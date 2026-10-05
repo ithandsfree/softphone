@@ -2,6 +2,8 @@
 
 Not a store submission. This is the order of operations once a flavor is ready to leave sideload.
 
+Play receives the Android softphone only. This repository also contains the BFF (`api/`). The BFF is installed on the FreePBX host. It is not uploaded to Play.
+
 ## Two listings
 
 | Flavor | Application id | Listing |
@@ -18,7 +20,7 @@ Privacy policy and GPL are separate. Google Play requires the privacy URL. GPL-2
 - [x] GPL-2.0 licence text ships with the app (Settings → Licences) and in this repo (`LICENSE`)
 - [x] Source is available, separate from the privacy policy: https://github.com/ithandsfree/softphone
       That URL goes on the store listing and is the in-app Licences → Source code row.
-- [ ] PJSIP used under GPL (this repo), not a closed Teluu build
+- [x] PJSIP used under GPL-2.0. The Play app is this client. Corresponding source is this repository.
 - [ ] No live hostnames, mailboxes, or extensions in the source that is tagged for the build
 - [ ] `community` build leaves the PBX URL and SIP domain empty
 - [x] IHF listing privacy policy URL, for the Play Console: https://ithandsfree.com/privacy
@@ -29,7 +31,8 @@ Privacy policy and GPL are separate. Google Play requires the privacy URL. GPL-2
 - [ ] Data safety form: encrypted on-device credentials, BFF token, optional contacts
 - [x] Target API level matches current Play requirements.
       A new app submitted after 31 August 2026 must target Android 16 (API 36). `compileSdk` and `targetSdk` are 36.
-- [ ] Closed testing track first; production and any charge come later
+- [ ] Closed testing track first; production and any charge come later.
+      Upload `:app:bundleIhfRelease` for `net.ithandsfree.softphone`. The `ihf` default server in this tree is `pbx.example.com`.
 
 ## Not in this release
 
