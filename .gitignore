@@ -5,6 +5,10 @@ config.php
 *.keystore
 keystore.properties
 local.properties
+host.local.properties
+windows/third_party/
+windows/native/out/
+windows/.jdk/
 .gradle/
 **/build/
 .idea/

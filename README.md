@@ -1,12 +1,25 @@
 # Softphone
 
-Android softphone and a small HTTPS API (BFF) for **FreePBX 17+**.
+GPL-2.0 softphone for **FreePBX 17+**. Two clients share one HTTPS API (BFF).
 
-Voice registers with PJSIP. SMS and MMS go through the FreePBX SMS Connector, not SIP MESSAGE. The phone never talks to FreePBX admin or UCP cookies; it uses a bearer token from this BFF (`X-IHF-Token`).
+| Label | Build | Path |
+| --- | --- | --- |
+| **Android** | Phone app. Kotlin and Jetpack Compose. | [`android/`](android/) |
+| **Desktop** | Windows app. Swing and PJSIP built from source. | [`windows/`](windows/) |
+
+Voice registers with PJSIP. SMS and MMS go through the FreePBX SMS Connector, not SIP MESSAGE. Neither client talks to FreePBX admin or UCP cookies. Both use a bearer token from this BFF (`X-IHF-Token`).
 
 License: **GPL-2.0**. See [LICENSE](LICENSE). The store listing source link is this repository. The Play privacy policy is a different URL, recorded in [docs/PLAY.md](docs/PLAY.md).
 
-Google Play gets two softphone apps from `android/`: IHF Phone (`net.ithandsfree.softphone`) and Community Softphone (`net.ithandsfree.softphone.community`). This repository also posts the BFF (`api/`). The BFF is not a Play upload.
+## Android
+
+Google Play gets two softphone apps from `android/`: IHF Phone (`net.ithandsfree.softphone`) and Community Softphone (`net.ithandsfree.softphone.community`). Issue label: `android`.
+
+## Desktop
+
+The Windows client is `windows/`. Review status, what is built, and what is left are in [windows/CODE-SPEC.md](windows/CODE-SPEC.md). Issue label: `desktop`. The desktop app is not a Play upload.
+
+This repository also posts the BFF (`api/`). The BFF is not a Play upload.
 
 ## Support
 
@@ -34,6 +47,7 @@ See [docs/FLAVORS.md](docs/FLAVORS.md).
 | Path | Purpose |
 | --- | --- |
 | `android/` | Kotlin + Jetpack Compose client |
+| `windows/` | Windows desktop client. Same BFF, PJSIP built from source |
 | `api/` | PHP BFF installed on the FreePBX host |
 | `docs/` | Install guide, support, flavors |
 | `skins-preview/` | HTML preview of the colour packs |
