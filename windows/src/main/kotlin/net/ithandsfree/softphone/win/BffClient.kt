@@ -47,10 +47,76 @@ class BffClient(
         return parsed ?: RequestEnrolResponse(ok = true, status = "check_inbox")
     }
 
+    /** User Manager sign-in. Returns a new bearer and the user's lines, the same shape as [session]. */
+    fun login(username: String, password: String): LoginResponse {
+        val payload = """{"username":${json.encodeToString(username.trim())},"password":${json.encodeToString(password)}}"""
+        val (code, text) = post("/v1/login", payload, token = null)
+        if (code !in 200..299) {
+            throw BffException(apiError(text) ?: "login_failed", code)
+        }
+        val parsed = json.decodeFromString(LoginResponse.serializer(), text)
+        if (parsed.token.isBlank()) throw BffException("login_returned_no_token", code)
+        return parsed
+    }
+
+    /** Ends this device's session on the server (the token stops working). */
+    fun logout(token: String) {
+        post("/v1/logout", "{}", token)
+    }
+
     fun session(token: String): LoginResponse {
         val text = get("/v1/session", token)
         val parsed = json.decodeFromString(LoginResponse.serializer(), text)
         return if (parsed.token.isBlank()) parsed.copy(token = token) else parsed
+    }
+
+    /** The user's lines with their capabilities and live DND. */
+    fun lines(token: String): LinesResponse {
+        val text = get("/v1/lines", token)
+        return json.decodeFromString(LinesResponse.serializer(), text)
+    }
+
+    /** PBX call history for the line's extension (UCP Call History rules apply on the server). */
+    fun calls(token: String, did: String, limit: Int = 100): CallsResponse {
+        val text = get("/v1/lines/${enc(did)}/calls?limit=$limit", token)
+        return json.decodeFromString(CallsResponse.serializer(), text)
+    }
+
+    /** One call recording's audio (WAV from the PBX). */
+    fun recording(token: String, did: String, callId: String, download: Boolean = false): ByteArray =
+        getBytes("/v1/lines/${enc(did)}/calls/${enc(callId)}/recording" + if (download) "?download=1" else "", token)
+
+    /** Voicemail for the line's extension (UCP Voicemail permissions). New messages first. */
+    fun voicemail(token: String, did: String, limit: Int = 100): VoicemailResponse {
+        val text = get("/v1/lines/${enc(did)}/voicemail?limit=$limit", token)
+        return json.decodeFromString(VoicemailResponse.serializer(), text)
+    }
+
+    /** New and heard counts, for badges. */
+    fun voicemailCount(token: String, did: String): VoicemailCount {
+        val text = get("/v1/lines/${enc(did)}/voicemail/count", token)
+        return json.decodeFromString(VoicemailCount.serializer(), text)
+    }
+
+    /** One voicemail's audio, always PCM WAV. */
+    fun voicemailAudio(token: String, did: String, id: String, download: Boolean = false): ByteArray =
+        getBytes("/v1/lines/${enc(did)}/voicemail/${enc(id)}/audio" + if (download) "?download=1" else "", token)
+
+    fun voicemailHeard(token: String, did: String, id: String) {
+        val code = post("/v1/lines/${enc(did)}/voicemail/${enc(id)}/heard", "{}", token)
+        if (code.first !in 200..299) throw BffException(apiError(code.second) ?: "voicemail_heard_failed", code.first)
+    }
+
+    fun deleteVoicemail(token: String, did: String, id: String) {
+        val builder = HttpRequest.newBuilder(URI.create(root + "/v1/lines/${enc(did)}/voicemail/${enc(id)}"))
+            .timeout(Duration.ofSeconds(30))
+            .DELETE()
+            .header(TOKEN_HEADER, token)
+        val resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+        // 404: the message is already gone (deleted from another device or a repeated press), which is what was asked.
+        if (resp.statusCode() !in 200..299 && resp.statusCode() != 404) {
+            throw BffException(apiError(resp.body()) ?: "voicemail_delete_failed", resp.statusCode())
+        }
     }
 
     fun sipCredentials(token: String, did: String): SipCredentialsResponse {
@@ -216,6 +282,44 @@ data class LoginUser(
 data class LineInfo(
     val did: String = "",
     val extension: String? = null,
+    /** Set by the admin (BFF config); the app shows these read-only. */
+    val capabilities: LineCapabilities? = null,
+)
+
+@Serializable
+data class LineCapabilities(
+    val voice: Boolean = true,
+    val sms: Boolean = true,
+    val mms: Boolean = true,
+    val dnd: Boolean = false,
+)
+
+@Serializable
+data class LinesResponse(val lines: List<LineInfo> = emptyList())
+
+@Serializable
+data class CallsResponse(
+    val extension: String? = null,
+    val permissions: CallPermissions = CallPermissions(),
+    val calls: List<PbxCall> = emptyList(),
+)
+
+@Serializable
+data class CallPermissions(val history: Boolean = false, val playback: Boolean = false, val download: Boolean = false)
+
+@Serializable
+data class PbxCall(
+    val id: String = "",
+    /** Unix seconds, call start. */
+    val at: Long = 0,
+    val direction: String = "",
+    val peer: String = "",
+    @SerialName("peer_name") val peerName: String = "",
+    val disposition: String = "",
+    val duration: Int = 0,
+    val billsec: Int = 0,
+    val recording: Boolean = false,
+    val format: String? = null,
 )
 
 @Serializable
@@ -239,6 +343,8 @@ data class ThreadInfo(
     val peer: String = "",
     val snippet: String? = null,
     val unread: Int = 0,
+    /** Unix seconds, as a string (BFF stringifies ids and times). */
+    @SerialName("last_message_at") val lastMessageAt: String? = null,
 )
 
 @Serializable
@@ -252,8 +358,13 @@ data class MessageInfo(
     val direction: String? = null,
     val body: String = "",
     val datetime: String? = null,
+    /** Unix seconds. The BFF may send it as a number or a string. */
+    val timestamp: kotlinx.serialization.json.JsonElement? = null,
     val media: List<MediaRef> = emptyList(),
-)
+) {
+    val epochMs: Long?
+        get() = epochMsOf((timestamp as? kotlinx.serialization.json.JsonPrimitive)?.content)
+}
 
 @Serializable
 data class MediaRef(
@@ -276,4 +387,34 @@ data class ApiError(
     val error: String? = null,
     val message: String? = null,
     val detail: String? = null,
+)
+
+@Serializable
+data class VoicemailResponse(
+    val extension: String? = null,
+    val permissions: VoicemailPermissions = VoicemailPermissions(),
+    /** The PBX's "My Voicemail" feature code (*97 by default); empty when the admin turned it off. */
+    val dial: String = "",
+    val new: Int = 0,
+    val old: Int = 0,
+    val messages: List<Voicemail> = emptyList(),
+)
+
+@Serializable
+data class VoicemailPermissions(val voicemail: Boolean = false, val playback: Boolean = false, val download: Boolean = false)
+
+@Serializable
+data class VoicemailCount(val extension: String? = null, val new: Int = 0, val old: Int = 0)
+
+@Serializable
+data class Voicemail(
+    val id: String = "",
+    val folder: String = "",
+    val new: Boolean = false,
+    val urgent: Boolean = false,
+    /** Unix seconds when the message was left. */
+    val at: Long = 0,
+    val number: String = "",
+    val name: String = "",
+    val duration: Int = 0,
 )

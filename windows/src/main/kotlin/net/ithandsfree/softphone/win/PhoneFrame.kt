@@ -1,5 +1,6 @@
 package net.ithandsfree.softphone.win
 
+import net.ithandsfree.softphone.win.ui.style
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Color
@@ -30,6 +31,15 @@ import javax.swing.SwingUtilities
 import javax.swing.Timer
 import javax.swing.WindowConstants
 import javax.swing.border.EmptyBorder
+
+/** Largest picture file read from a drop or the file picker. MMS needs about 1 MB after resizing anyway. */
+private const val MAX_PHOTO_FILE = 25L * 1024 * 1024
+
+/** Decoded original photos kept in memory for the full-size viewer. */
+private const val FULL_PHOTOS_KEPT = 8
+
+/** Call volume choices: percent of the audio as received. */
+private val CALL_VOLUMES = listOf(100 to "Normal", 150 to "Louder", 200 to "Loud", 300 to "Loudest")
 
 /**
  * Welcome, then Calls, Messages, Lines, and Settings.
@@ -70,17 +80,12 @@ class PhoneFrame(
         font = mono
         foreground = gold
     }
-    private val dial = DialEntry(caption)
+    // Empty with a caret, as in the mockup; the accessible name tells a screen reader what it is.
+    private val dial = JTextField().apply { getAccessibleContext().accessibleName = "Number to call" }
     private val callState = label("No call")
     private val smsTo = field()
-    private val smsBody = JTextArea(3, 24).apply {
-        lineWrap = true
-        wrapStyleWord = true
-        background = raised
-        foreground = ink
-        caretColor = gold
-        font = uiFont
-        border = EmptyBorder(8, 10, 8, 10)
+    private val smsBody: JTextArea = net.ithandsfree.softphone.win.ui.HintArea("Write a message", caption).apply {
+        getAccessibleContext().accessibleName = "Message"
     }
     private val attachNote = JLabel("").apply {
         font = Font("Segoe UI", Font.PLAIN, 12)
@@ -124,7 +129,7 @@ class PhoneFrame(
     private var lastParty = ""
     private var lastIncoming = false
     private var lastConnected = false
-    private val recentRows = JPanel()
+    private val recentRows = net.ithandsfree.softphone.win.ui.WidthTrackingPanel()
     private var recentEntries: List<CallEntry> = emptyList()
     private var recentIndex = -1
     private var missedOnly = false
@@ -134,20 +139,17 @@ class PhoneFrame(
     private var browsingDuringCall = false
     private var detailOpen = false
     private var undoRecent: CallEntry? = null
-    private val detailTitle = JLabel("Call")
-    private val detailMeta = JLabel("")
-    private val detailHistory = JPanel()
-    private val findBox = PromptField("Search contacts or dial")
+    private val findBox = JTextField()
     private val headerStatus = JLabel("No line")
     private lateinit var recentsPane: JPanel
-    private var narrowList = true
+    private var narrowList = false
     private val recentEmpty = label("No recent calls yet.")
     private val allRecentButton = JButton("All lines")
     private val missedRecentButton = JButton("Missed")
     private val lineSwitch = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 8, 0))
     private val callTabs = JPanel()
     private val callsBody = JPanel(java.awt.CardLayout())
-    private val contactsList = JPanel()
+    private val contactsList = net.ithandsfree.softphone.win.ui.WidthTrackingPanel()
     private var callsView = "recents"
     private val historyFilters = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0))
     private val lineList = JPanel()
@@ -240,12 +242,102 @@ class PhoneFrame(
     private val ringtoneModel = javax.swing.DefaultComboBoxModel<String>()
     private var fillingAudio = false
     private val audioNote = label("Sound devices appear after the line registers.")
-    private val micMeter = MicMeter(raised, gold, hairline)
     private var micPeak = 0
     private var micPeakAt = 0L
-    private var pinBox: javax.swing.JCheckBox? = null
-    private var dndBox: javax.swing.JCheckBox? = null
     private lateinit var removeRingtone: JComponent
+
+    private val tokens = net.ithandsfree.softphone.win.ui.Tokens.of(profile.id)
+    private lateinit var titleBar: net.ithandsfree.softphone.win.ui.TitleBar
+    private lateinit var toast: net.ithandsfree.softphone.win.ui.Toast
+    private lateinit var navRail: net.ithandsfree.softphone.win.ui.NavRail
+    private val lineRail = net.ithandsfree.softphone.win.ui.LineRail(tokens) { ext -> pickLine(ext) }
+    private lateinit var dialPad: net.ithandsfree.softphone.win.ui.DialPad
+    private lateinit var callsTabs: net.ithandsfree.softphone.win.ui.UnderlineTabs
+    private lateinit var bottomNav: net.ithandsfree.softphone.win.ui.BottomNav
+    private lateinit var callsPage: JPanel
+    private val callsTitle = JLabel("Calls")
+    private var compactMode = false
+    private val callTracker = CallTracker()
+    private lateinit var callWaitingBar: net.ithandsfree.softphone.win.ui.CallWaitingBar
+    private var waitingAnnounced = -1
+    private lateinit var voicemailPane: net.ithandsfree.softphone.win.ui.VoicemailPane
+    private val vmData = java.util.concurrent.ConcurrentHashMap<String, VoicemailResponse>()
+    private val vmNotice = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val vmNew = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private var vmFilter: String? = null
+    private var vmOpen: String? = null
+    @Volatile private var vmLoading = false
+    private val vmAudio = LinkedHashMap<String, ByteArray>()
+    private var vmProgress: Timer? = null
+    private val vmDeleting: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private var sendToDevicesButton: JButton? = null
+    private var callVolumeCombo: javax.swing.JComboBox<String>? = null
+    // Blind transfer in progress: what the person asked for, and since when; refreshCall reports the PBX's answer.
+    private var transferWatch: String? = null
+    private var transferSince = 0L
+    private val shortcutEditRows = linkedMapOf<Shortcut, net.ithandsfree.softphone.win.ui.ShortcutEditRow>()
+    private var capturingRow: net.ithandsfree.softphone.win.ui.ShortcutEditRow? = null
+    private var lastWideBounds: java.awt.Rectangle? = null
+    private lateinit var inCallPane: net.ithandsfree.softphone.win.ui.InCallPane
+    private lateinit var callDetailPane: net.ithandsfree.softphone.win.ui.CallDetailPane
+    private lateinit var linesPage: net.ithandsfree.softphone.win.ui.LinesPage
+    private lateinit var settingsShell: net.ithandsfree.softphone.win.ui.SettingsShell
+    private var settingsSection = "audio"
+    private val settingsMeter = net.ithandsfree.softphone.win.ui.LevelBars(tokens)
+    private val echoCaption = JLabel("Calls the PBX echo test. Speak, and you'll hear yourself back.")
+    private var pinToggle: net.ithandsfree.softphone.win.ui.Switch? = null
+    private var dndToggle: net.ithandsfree.softphone.win.ui.Switch? = null
+    private var linesSelected: String? = null
+    private val lineDnd = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val lineCaps = java.util.concurrent.ConcurrentHashMap<String, LineCapabilities>()
+    private var dtmfHolder: JComponent? = null
+    private val activeCard = net.ithandsfree.softphone.win.ui.ActiveCallCard(tokens) {
+        browsingDuringCall = false
+        showRoot("app")
+        showTab("calls")
+        callDetailCards.show(callDetail, "live")
+    }
+    private var convoLineKey = ""
+    private val messagesLineRail =net.ithandsfree.softphone.win.ui.LineRail(tokens) { ext -> pickLine(ext) }
+    private val threadSearch = JTextField().apply {
+        putClientProperty(com.formdev.flatlaf.FlatClientProperties.PLACEHOLDER_TEXT, "Search threads")
+    }
+    private var allThreads: List<ThreadInfo> = emptyList()
+    private lateinit var convoHeader: net.ithandsfree.softphone.win.ui.ConversationHeader
+    private lateinit var viaBar: net.ithandsfree.softphone.win.ui.ViaBar
+    private lateinit var attachCard: net.ithandsfree.softphone.win.ui.AttachmentCard
+    private var transcriptScroll: JScrollPane? = null
+    private val newMessageRow = JPanel(BorderLayout(12, 0))
+    private val composerFrom = JLabel(" ")
+    private val composerFromDot = net.ithandsfree.softphone.win.ui.Dot(tokens.line1, 7)
+    private val allChip = net.ithandsfree.softphone.win.ui.Chip(tokens, "All lines") {
+        missedOnly = false
+        historyExtension = null
+        styleRecentFilters()
+        reloadRecents()
+    }
+    private val missedChip = net.ithandsfree.softphone.win.ui.Chip(tokens, "Missed") {
+        missedOnly = true
+        historyExtension = null
+        styleRecentFilters()
+        reloadRecents()
+    }
+
+    /** Extension whose link setup is getting a sign-in, or null when the sign-in sets up a new line. */
+    private var signInFor: String? = null
+    private val signInUser = field()
+    private val signInPassword = javax.swing.JPasswordField().apply {
+        background = raised
+        foreground = ink
+        caretColor = gold
+        font = uiFont
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(hairline),
+            BorderFactory.createEmptyBorder(8, 10, 8, 10),
+        )
+    }
+    private val signInIntro = label("Sign in with your user account")
+    private val signInError = label(" ").apply { foreground = coral }
 
     init {
         val windowIcons = DesktopIcons.windowIcons(DesktopIcons.flavor(profile))
@@ -253,9 +345,12 @@ class PhoneFrame(
         defaultCloseOperation = WindowConstants.DO_NOTHING_ON_CLOSE
         contentPane.background = ground
         root.background = ground
+        installTitleBar()
+        toast = net.ithandsfree.softphone.win.ui.Toast(this, tokens)
         root.add(welcome(), "welcome")
         root.add(scroll(linkSent()), "sent")
         root.add(scroll(codeEntry()), "code")
+        root.add(scroll(signInPage()), "signin")
         if (profile.serverEditable) root.add(scroll(advanced()), "advanced")
         root.add(appShell(), "app")
         contentPane.add(root)
@@ -285,8 +380,15 @@ class PhoneFrame(
         val savedLines = LineBook.load()
         if (savedLines.isNotEmpty()) {
             session.restoreAll(savedLines, LineBook.defaultExtension())
+            // Lines saved by a build before 0.1.33 hold plain-text secrets. Seal them now.
+            if (LineBook.hasPlainSecrets()) runCatching { LineBook.save(savedLines, LineBook.defaultExtension()) }
             showRoot("app")
             showTab("calls")
+            // Rows were built before the lines were restored; redraw them with line names and colours.
+            reloadRecents()
+            // Setup-link tokens become long-lived device tokens (no sign-in screen for messages).
+            work("Lines") { session.upgradeTokens() }
+            SwingUtilities.invokeLater { dial.requestFocusInWindow() }
             refreshLine()
             askedRegister = true
             work("Register") {
@@ -303,12 +405,21 @@ class PhoneFrame(
             productName = profile.productName,
             theme = theme,
             onAnswer = {
-                reveal()
-                work("Answer") { session.answer(); note("Answered") }
+                if (SipBridge.snapshot().waitingState == 1) {
+                    answerWaiting()
+                } else {
+                    reveal()
+                    work("Answer") { session.answer(); note("Answered") }
+                }
             },
             onDecline = {
                 work("Decline") {
-                    if (SipBridge.snapshot().incoming) session.decline() else session.hangup()
+                    val snap = SipBridge.snapshot()
+                    when {
+                        snap.waitingState == 1 -> session.waitingEnd()
+                        snap.incoming -> session.decline()
+                        else -> session.hangup()
+                    }
                 }
             },
             onHangup = { work("Hang up") { session.hangup() } },
@@ -316,6 +427,8 @@ class PhoneFrame(
             onOpen = { reveal() },
             onQuit = { quitPhone() },
             onPin = { pinned -> isAlwaysOnTop = pinned },
+            tokens = tokens,
+            mark = brandMark(18),
         )
         surfaces.installTray(windowIcons.firstOrNull())
         addWindowListener(object : java.awt.event.WindowAdapter() {
@@ -328,9 +441,28 @@ class PhoneFrame(
         java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher { event ->
             dispatchShortcut(event)
         }
+        applyGlobalHotkeys()
 
         Timer(300) { refreshCall() }.apply { isRepeats = true; start() }
         Timer(80) { paintMicLevel() }.apply { isRepeats = true; start() }
+        SwingUtilities.invokeLater { applyWindowShape() }
+        // Voicemail: first look shortly after start, then every minute (new-message toast and badges).
+        Timer(60_000) { if (session.lines().isNotEmpty()) loadVoicemail(quiet = true) }.apply { initialDelay = 8_000; isRepeats = true; start() }
+    }
+
+    /** Design review only: the incoming window for the second line with a sample caller. */
+    internal fun previewIncoming() {
+        val ext = session.lines().getOrNull(1)?.extension ?: session.line?.extension
+        surfaces.previewIncoming(
+            net.ithandsfree.softphone.win.ui.CallCard(
+                title = "(705) 555-0142",
+                titleIsNumber = true,
+                subtitle = "Not in contacts",
+                lineLabel = lineLabel(ext),
+                lineColorIndex = lineIndex(ext) ?: 0,
+                lineNumber = session.lines().firstOrNull { it.extension == ext }?.did?.let { displayNumber(it) },
+            ),
+        )
     }
 
     internal fun reveal() {
@@ -347,19 +479,97 @@ class PhoneFrame(
     }
 
     private fun rememberWindow() {
+        net.ithandsfree.softphone.win.ui.ShortcutSheet.fit(rootPane)
         if (!isVisible || (extendedState and java.awt.Frame.ICONIFIED) != 0) return
+        applyWindowShape()
         if (width < 360 || height < 400) return
         WindowPrefs.saveBounds(x, y, width, height)
-        applyWindowShape()
+        if (width >= 720 && extendedState == java.awt.Frame.NORMAL) lastWideBounds = bounds
     }
 
+    /**
+     * Below 720 px the window becomes the phone layout (`desktop-compact.png`): bottom bar instead of the rail,
+     * pin and expand in the title bar, and Calls as one pane with Keypad / Recents / Contacts tabs.
+     */
     private fun applyWindowShape() {
-        if (!::recentsPane.isInitialized) return
-        val narrow = width in 1..719
-        keypadJump.isVisible = narrow
-        recentsPane.isVisible = !narrow || narrowList
-        callDetail.isVisible = !narrow || !narrowList
-        recentsPane.revalidate()
+        if (!::recentsPane.isInitialized || !::callsPage.isInitialized) return
+        val compact = width in 1..719
+        keypadJump.isVisible = false
+        if (compact != compactMode) {
+            compactMode = compact
+            titleBar.compact(compact)
+            titleBar.pinned(WindowPrefs.pinned())
+            navRail.isVisible = !compact
+            bottomNav.isVisible = compact
+            callsTitle.isVisible = !compact
+            callsTabs.only(if (compact) listOf("keypad", "recents", "contacts", "voicemail") else listOf("recents", "contacts", "voicemail"))
+
+            dialPad.compact(compact)
+            dial.text = dial.text // restyle the number for the new size
+            if (::settingsShell.isInitialized) settingsShell.compact(compact)
+            if (::linesPage.isInitialized) linesPage.compact(compact)
+        }
+        val snap = SipBridge.snapshot()
+        val callShown = (snap.callActive || snap.incoming) && !browsingDuringCall
+        callsPage.removeAll()
+        when {
+            !compact -> {
+                recentsPane.preferredSize = Dimension(net.ithandsfree.softphone.win.ui.Space.LIST_W, 200)
+                recentsPane.border = BorderFactory.createMatteBorder(0, 0, 0, 1, tokens.divider)
+                recentsPane.isVisible = true
+                callsBody.isVisible = true
+                callDetail.isVisible = true
+                callsPage.add(recentsPane, BorderLayout.WEST)
+                callsPage.add(callDetail, BorderLayout.CENTER)
+                callsTabs.select(callsView)
+                historyFilters.isVisible = callsView == "recents"
+            }
+            narrowList && !callShown && !detailOpen -> {
+                recentsPane.preferredSize = null
+                recentsPane.border = EmptyBorder(0, 0, 0, 0)
+                recentsPane.isVisible = true
+                callsBody.isVisible = true
+                historyFilters.isVisible = callsView == "recents"
+                callsPage.add(recentsPane, BorderLayout.CENTER)
+                callsTabs.select(callsView)
+            }
+            else -> {
+                // Keypad, a recent's detail, or the call: the line rail and tabs stay on top, except during a call.
+                recentsPane.preferredSize = null
+                recentsPane.border = EmptyBorder(0, 0, 0, 0)
+                recentsPane.isVisible = !callShown
+                callsBody.isVisible = false
+                historyFilters.isVisible = false
+                callDetail.isVisible = true
+                callsPage.add(recentsPane, BorderLayout.NORTH)
+                callsPage.add(callDetail, BorderLayout.CENTER)
+                callsTabs.select(if (detailOpen) callsView else "keypad")
+            }
+        }
+        callsPage.revalidate()
+        callsPage.repaint()
+    }
+
+    /** Compact title bar: pin on top. Same setting as Settings › Appearance and the tray. */
+    private fun setPinned(on: Boolean) {
+        WindowPrefs.savePin(on)
+        isAlwaysOnTop = on
+        surfaces.setToggles(on, WindowPrefs.dnd())
+        pinToggle?.set(on)
+        titleBar.pinned(on)
+    }
+
+    /** Compact title bar: expand to the full layout at the last wide size, or 1100 × 760. */
+    private fun expandWindow() {
+        val wide = lastWideBounds
+        if (wide != null && wide.width >= 720) {
+            bounds = wide
+        } else {
+            val screen = graphicsConfiguration.bounds
+            val w = 1100.coerceAtMost(screen.width - 40)
+            val h = height.coerceAtLeast(760).coerceAtMost(screen.height - 40)
+            setBounds((x - (w - width) / 2).coerceIn(screen.x, screen.x + screen.width - w), y.coerceAtLeast(screen.y), w, h)
+        }
     }
 
     private fun eraseDialDigit() {
@@ -394,6 +604,10 @@ class PhoneFrame(
 
     private fun openTransfer() {
         if (!SipBridge.snapshot().callActive) return
+        callExtension()?.let { ext ->
+            sendToDevicesButton?.text = "Send to my other devices ($ext)"
+            sendToDevicesButton?.toolTipText = "Rings your desk phone, mobile app and any other device on $ext"
+        }
         transferField.text = ""
         transferDialog.isVisible = true
         transferDialog.toFront()
@@ -440,7 +654,15 @@ class PhoneFrame(
         finishConsultButton = finish
         cancelConsultButton = back
         val cancel = ghost("Cancel", expand = false) { transferDialog.isVisible = false }
+        val devices = WelcomeButton("Send to my other devices", raised, ink, quiet = true, quietFill = raised, line = hairline, expand = false, focusRing = gold)
+        devices.addActionListener { sendToOtherDevices() }
+        devices.alignmentX = Component.LEFT_ALIGNMENT
+        sendToDevicesButton = devices
         panel.add(title)
+        panel.add(Box.createVerticalStrut(10))
+        panel.add(devices)
+        panel.add(Box.createVerticalStrut(14))
+        panel.add(wrappingCopy("Or send it to someone else:"))
         panel.add(Box.createVerticalStrut(8))
         panel.add(wrappingCopy("The other person is sent straight to this number."))
         panel.add(Box.createVerticalStrut(12))
@@ -481,22 +703,48 @@ class PhoneFrame(
         runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI(url)) }
     }
 
-    private fun openPhoto(label: JLabel, image: java.awt.Image) {
+    /** Click opens the original. Only the last few originals stay decoded; older ones are fetched again. */
+    private fun openPhoto(label: JLabel, source: String) {
         label.cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
         label.addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseClicked(event: java.awt.event.MouseEvent) = showLargePhoto(image)
+            override fun mouseClicked(event: java.awt.event.MouseEvent) {
+                work("Photo") {
+                    val image = loadPhoto(source) ?: throw IllegalStateException("Photo is not available")
+                    SwingUtilities.invokeLater { showLargePhoto(image) }
+                }
+            }
         })
     }
 
+    /** Original picture for a message, decoded once and kept for the [FULL_PHOTOS_KEPT] most recent. */
+    private fun loadPhoto(source: String): java.awt.image.BufferedImage? {
+        synchronized(photoFull) { photoFull[source] }?.let { return it as? java.awt.image.BufferedImage }
+        val bytes = runCatching { session.media(source) }.getOrNull() ?: return null
+        val image = runCatching { javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(bytes)) }.getOrNull() ?: return null
+        synchronized(photoFull) {
+            photoFull[source] = image
+            // A decoded 12 MP phone photo is ~48 MB; keep only a handful.
+            while (photoFull.size > FULL_PHOTOS_KEPT) photoFull.remove(photoFull.keys.first())
+        }
+        return image
+    }
+
+    /** Full-size photo, aspect ratio kept, fitted to 85% of the screen; Esc closes. Never modal (call timer). */
     private fun showLargePhoto(image: java.awt.Image) {
         val dialog = JDialog(this, "Photo")
         dialog.isModal = false
-        val width = image.getWidth(null).coerceIn(1, 960)
-        val height = image.getHeight(null).coerceIn(1, 720)
-        val view = JLabel(javax.swing.ImageIcon(image.getScaledInstance(width, height, java.awt.Image.SCALE_SMOOTH)))
-        dialog.contentPane = JScrollPane(view)
-        dialog.setSize((width + 32).coerceAtMost(1000), (height + 48).coerceAtMost(780))
+        dialog.contentPane = net.ithandsfree.softphone.win.ui.PhotoViewer(tokens, image)
+        val screen = graphicsConfiguration.bounds
+        val iw = image.getWidth(null).coerceAtLeast(1).toDouble()
+        val ih = image.getHeight(null).coerceAtLeast(1).toDouble()
+        val fit = minOf(screen.width * 0.85 / iw, screen.height * 0.85 / ih, 1.0)
+        dialog.contentPane.preferredSize = Dimension((iw * fit).toInt().coerceAtLeast(240), (ih * fit).toInt().coerceAtLeast(160))
+        dialog.pack()
         dialog.setLocationRelativeTo(this)
+        dialog.rootPane.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(javax.swing.KeyStroke.getKeyStroke("ESCAPE"), "close")
+        dialog.rootPane.actionMap.put("close", object : javax.swing.AbstractAction() {
+            override fun actionPerformed(e: java.awt.event.ActionEvent) = dialog.dispose()
+        })
         dialog.isVisible = true
     }
 
@@ -504,59 +752,86 @@ class PhoneFrame(
         val number = transferField.text.trim()
         if (number.isBlank()) return
         transferDialog.isVisible = false
-        work("Transfer") { session.transfer(number); note("Transfer sent") }
+        blindTransfer(number, number)
+    }
+
+    /** The extension the current call is on (the line it rang on or was placed from). */
+    private fun callExtension(): String? =
+        SipBridge.snapshot().callExtension.ifBlank { null } ?: session.line?.extension
+
+    /**
+     * "Send to my other devices": a blind transfer to the call's own extension, so the desk phone, the mobile app and
+     * any other device on that extension ring and whichever is picked up takes the call.
+     */
+    private fun sendToOtherDevices() {
+        val ext = callExtension() ?: return
+        transferDialog.isVisible = false
+        blindTransfer(ext, "your other devices on $ext")
+    }
+
+
+    private fun blindTransfer(number: String, shown: String) {
+        DiagLog.app("transfer requested to $number")
+        transferWatch = shown
+        transferSince = System.currentTimeMillis()
+        work("Transfer") {
+            session.transfer(number)
+            note("Sending the call to $shown…")
+        }
+    }
+
+    /** Called from refreshCall: turns the PBX's transfer NOTIFY into a plain message. */
+    private fun watchTransfer(snap: SipBridge.Snapshot) {
+        val shown = transferWatch ?: return
+        val code = snap.transferCode
+        when {
+            code in 200..299 -> {
+                note("Call sent to $shown")
+                transferWatch = null
+            }
+            code >= 300 && snap.transferFinal -> {
+                note("Transfer to $shown failed: $code ${snap.transferText}".trim())
+                transferWatch = null
+            }
+            !snap.callActive -> {
+                // The PBX ended our leg without a final NOTIFY: the transfer went through.
+                note("Call sent to $shown")
+                transferWatch = null
+            }
+            System.currentTimeMillis() - transferSince > 20_000 -> {
+                note("No answer from the PBX about the transfer to $shown. The call is still with you.")
+                transferWatch = null
+            }
+        }
     }
 
     private fun dispatchShortcut(event: java.awt.event.KeyEvent): Boolean {
         if (event.id != java.awt.event.KeyEvent.KEY_PRESSED) return false
+        net.ithandsfree.softphone.win.ui.KeyCapture.listener?.let { return it(event) }
+        // Only keys typed into this window; the incoming and mini windows have their own keys.
+        val window = event.component as? java.awt.Window ?: SwingUtilities.getWindowAncestor(event.component)
+        if (window !== this && window?.owner !== this) return false
+        if (net.ithandsfree.softphone.win.ui.ShortcutSheet.isOpen(rootPane)) {
+            if (event.keyCode == java.awt.event.KeyEvent.VK_ESCAPE || event.keyChar == '?') {
+                net.ithandsfree.softphone.win.ui.ShortcutSheet.close(rootPane)
+                return true
+            }
+            return false
+        }
         val focus = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner
-        val typing = focus is JTextField || focus is JTextArea
-        val ctrl = event.isControlDown
-        val alt = event.isAltDown
-        val plain = !ctrl && !alt && !event.isMetaDown
+        val typing = focus is javax.swing.text.JTextComponent
+        val plain = !event.isControlDown && !event.isAltDown && !event.isMetaDown
         val snap = SipBridge.snapshot()
         val onCall = snap.callActive && !snap.incoming
+        val keymap = KeymapStore.current()
+        val action = keymap.actionFor(event)
+        if (action != null && (!action.inCall || (onCall && !typing)) && (!keymap.chord(action).plain || !typing)) {
+            if (runShortcut(action, snap)) return true
+        }
         return when {
-            ctrl && event.keyCode == java.awt.event.KeyEvent.VK_ENTER -> {
-                answerOrCall(snap)
-                true
-            }
-            ctrl && event.keyCode == java.awt.event.KeyEvent.VK_D -> {
-                endOrDecline(snap)
-                true
-            }
-            ctrl && event.keyCode == java.awt.event.KeyEvent.VK_N -> {
-                startNewMessage()
-                true
-            }
-            ctrl && event.keyCode == java.awt.event.KeyEvent.VK_K -> {
-                focusDial()
-                true
-            }
-            ctrl && !event.isShiftDown && event.keyCode == java.awt.event.KeyEvent.VK_1 -> {
-                chooseLine(0); true
-            }
-            ctrl && !event.isShiftDown && event.keyCode == java.awt.event.KeyEvent.VK_2 -> {
-                chooseLine(1); true
-            }
-            alt && event.keyCode == java.awt.event.KeyEvent.VK_1 -> {
-                showRoot("app"); showTab("calls"); true
-            }
-            alt && event.keyCode == java.awt.event.KeyEvent.VK_2 -> {
-                showRoot("app"); showTab("messages"); true
-            }
-            alt && event.keyCode == java.awt.event.KeyEvent.VK_3 -> {
-                showRoot("app"); showTab("lines"); true
-            }
-            alt && event.keyCode == java.awt.event.KeyEvent.VK_4 -> {
-                showRoot("app"); showTab("settings"); loadAudioDevices(); true
-            }
             plain && !typing && (event.keyChar == '?' || (event.isShiftDown && event.keyCode == java.awt.event.KeyEvent.VK_SLASH)) -> {
                 showShortcuts()
                 true
-            }
-            plain && !typing && onCall && event.keyCode == java.awt.event.KeyEvent.VK_M -> {
-                toggleMute(); true
             }
             plain && !typing && !onCall && currentTab == "calls" && event.keyCode == java.awt.event.KeyEvent.VK_M -> {
                 selectedRecent()?.let { messageRecent(it) }; true
@@ -588,7 +863,8 @@ class PhoneFrame(
             plain && !typing && currentTab == "calls" && event.keyCode == java.awt.event.KeyEvent.VK_UP -> {
                 moveRecent(-1); true
             }
-            plain && event.isControlDown && event.keyCode == java.awt.event.KeyEvent.VK_Z && undoRecent != null -> {
+            event.isControlDown && !event.isShiftDown && !event.isAltDown && event.keyCode == java.awt.event.KeyEvent.VK_Z &&
+                undoRecent != null && !typing -> {
                 CallLog.append(undoRecent ?: return false)
                 undoRecent = null
                 reloadRecents()
@@ -602,15 +878,6 @@ class PhoneFrame(
                 selectedRecent()?.let { entry -> recentMenu(entry).show(recentRows, 24, 24) }
                 true
             }
-            plain && !typing && onCall && event.keyCode == java.awt.event.KeyEvent.VK_H -> {
-                toggleHold(); true
-            }
-            plain && !typing && onCall && event.keyCode == java.awt.event.KeyEvent.VK_T -> {
-                openTransfer(); true
-            }
-            plain && !typing && onCall && event.keyCode == java.awt.event.KeyEvent.VK_K -> {
-                toggleDtmfPad(); true
-            }
             plain && !typing && onCall && showDtmf && event.keyChar in "0123456789*#" -> {
                 sendDtmf(event.keyChar.toString())
                 true
@@ -619,8 +886,107 @@ class PhoneFrame(
         }
     }
 
+    /** Runs a remappable action; false when it does not apply right now, so the key goes on to the focused field. */
+    private fun runShortcut(action: Shortcut, snap: SipBridge.Snapshot): Boolean {
+        when (action) {
+            Shortcut.SEARCH -> focusDial()
+            Shortcut.LINE_1 -> chooseLine(0)
+            Shortcut.LINE_2 -> chooseLine(1)
+            Shortcut.NEW_MESSAGE -> startNewMessage()
+            Shortcut.TOGGLE_DND -> toggleActiveLineDnd()
+            Shortcut.TAB_CALLS -> { showRoot("app"); showTab("calls") }
+            Shortcut.TAB_MESSAGES -> { showRoot("app"); refreshThreads(); showTab("messages") }
+            Shortcut.TAB_LINES -> { showRoot("app"); refreshLine(); showTab("lines") }
+            Shortcut.TAB_SETTINGS -> { showRoot("app"); showTab("settings"); loadAudioDevices() }
+            Shortcut.CALL_ANSWER -> answerOrCall(snap)
+            Shortcut.END_DECLINE -> endOrDecline(snap)
+            Shortcut.MUTE -> toggleMute()
+            Shortcut.HOLD -> toggleHold()
+            Shortcut.TRANSFER -> openTransfer()
+            Shortcut.KEYPAD -> toggleDtmfPad()
+            Shortcut.NEXT_THREAD -> if (currentTab == "messages") moveThread(1) else return false
+            Shortcut.PREVIOUS_THREAD -> if (currentTab == "messages") moveThread(-1) else return false
+            Shortcut.GLOBAL_ANSWER, Shortcut.GLOBAL_HANG_UP, Shortcut.GLOBAL_MUTE -> runGlobal(action)
+        }
+        return true
+    }
+
+    /** System-wide hotkeys (from [GlobalHotkeys]); they act on the call whichever app is in front. */
+    private fun runGlobal(action: Shortcut) {
+        val snap = SipBridge.snapshot()
+        when (action) {
+            Shortcut.GLOBAL_ANSWER -> if (snap.incoming) work("Answer") { session.answer(); note("Answered") }
+            Shortcut.GLOBAL_HANG_UP -> endOrDecline(snap)
+            Shortcut.GLOBAL_MUTE -> if (snap.callActive && !snap.incoming) toggleMute()
+            else -> Unit
+        }
+    }
+
+    private fun moveThread(step: Int) {
+        val size = threadModel.size
+        if (size == 0) return
+        val next = if (threadList.selectedIndex < 0) 0 else (threadList.selectedIndex + step).coerceIn(0, size - 1)
+        threadList.selectedIndex = next
+        threadList.ensureIndexIsVisible(next)
+    }
+
+    /** Do not disturb on the PBX for the line that calls and messages use now (Ctrl Shift D by default). */
+    private fun toggleActiveLineDnd() {
+        val line = session.line ?: return
+        val extension = line.extension
+        work("Do not disturb") {
+            val on = !(lineDnd[extension] ?: session.pbxDnd(line))
+            session.setPbxDnd(line, on)
+            lineDnd[extension] = on
+            note(if (on) "${lineLabel(extension)} is on Do not disturb" else "${lineLabel(extension)} is available")
+            loadLineFacts(extension)
+        }
+    }
+
+    /** (Re)registers the system-wide keys after start and after every change in Settings. */
+    private fun applyGlobalHotkeys() {
+        val keymap = KeymapStore.current()
+        GlobalHotkeys.apply(keymap, onAction = { runGlobal(it) }) { refused ->
+            if (refused.isNotEmpty()) {
+                note("Another app already uses ${refused.joinToString(", ") { keymap.chord(it).label() }}")
+            }
+        }
+    }
+
+    /** Call waiting: the bar above the call controls, Do not disturb, and the diagnostic log. */
+    private fun watchCallWaiting(snap: SipBridge.Snapshot) {
+        if (!::callWaitingBar.isInitialized) return
+        val ext = snap.waitingExtension
+        if (snap.waitingState == 0) {
+            waitingAnnounced = -1
+        } else if (waitingAnnounced != snap.waitingId) {
+            waitingAnnounced = snap.waitingId
+            if (snap.waitingState == 1) {
+                DiagLog.app("call waiting on $ext")
+                // Do not disturb on this PC: the second call goes on as busy (other devices, then voicemail).
+                if (WindowPrefs.dnd()) work("Second call") { session.waitingEnd() }
+            }
+        }
+        val showState = if (snap.waitingState == 1 && WindowPrefs.dnd()) 0 else snap.waitingState
+        val party = displayParty(snap.waitingRemote, "")
+        val person = ContactBook.nameFor(party)
+        val caller = person?.name ?: displayNumber(party).ifBlank { "Caller ID withheld" }
+        callWaitingBar.show(showState, caller, person == null && party.isNotBlank(), lineLabel(ext), lineIndex(ext) ?: 0)
+        callWaitingBar.parent?.isVisible = callWaitingBar.isVisible
+    }
+
+    /** Hold & answer: the current call goes on hold and the ringing one is answered. */
+    private fun answerWaiting() {
+        reveal()
+        work("Answer") {
+            session.waitingAnswer()
+            note("Answered. The first call is on hold.")
+        }
+    }
+
     private fun answerOrCall(snap: SipBridge.Snapshot) {
         when {
+            snap.waitingState == 1 -> answerWaiting()
             snap.incoming -> work("Answer") { session.answer(); note("Answered") }
             !snap.callActive -> placeCall()
         }
@@ -628,6 +994,8 @@ class PhoneFrame(
 
     private fun endOrDecline(snap: SipBridge.Snapshot) {
         when {
+            // While a second call rings, End / decline declines that one; the current call stays up.
+            snap.waitingState == 1 -> work("Decline") { session.waitingEnd() }
             snap.incoming -> work("Decline") { session.decline() }
             snap.callActive -> work("Hang up") { session.hangup() }
         }
@@ -647,59 +1015,61 @@ class PhoneFrame(
         threadList.clearSelection()
         smsTo.text = ""
         threadTitle.text = "New message"
+        clearPhoto()
+        showConversationFor(null)
         transcript.removeAll()
         transcript.revalidate()
+        transcript.repaint()
         smsTo.requestFocus()
     }
 
+    /** The `?` sheet, built from the current keymap so remapped keys show as they are. */
     private fun showShortcuts() {
-        val dialog = JDialog(this, "Keyboard shortcuts")
-        dialog.isModal = false
-        val panel = JPanel()
-        panel.layout = BoxLayout(panel, BoxLayout.Y_AXIS)
-        panel.background = ground
-        panel.border = EmptyBorder(18, 18, 18, 18)
-        val title = JLabel("Keyboard shortcuts")
-        title.font = serif
-        title.foreground = ink
-        title.alignmentX = Component.LEFT_ALIGNMENT
-        panel.add(title)
-        panel.add(Box.createVerticalStrut(12))
-        listOf(
-            "Ctrl K  focuses the number",
-            "Ctrl N  new message",
-            "Ctrl Enter  call or answer",
-            "Ctrl D  end or decline",
-            "Alt 1 to Alt 4  Calls, Messages, Lines, Settings",
-            "Ctrl 1 and Ctrl 2  switch lines",
-            "During a call, when you are not typing:",
-            "M mute,  H hold,  T transfer,  K keypad",
-            "Enter sends a message. Shift Enter starts a new line.",
-            "? opens this list",
-        ).forEach { line ->
-            panel.add(wrappingCopy(line))
-            panel.add(Box.createVerticalStrut(6))
-        }
-        val close = ghost("Close", expand = false) { dialog.dispose() }
-        panel.add(Box.createVerticalStrut(8))
-        panel.add(close)
-        dialog.contentPane = panel
-        dialog.rootPane.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(
-            javax.swing.KeyStroke.getKeyStroke("ESCAPE"),
-            "close-shortcuts",
+        val keymap = KeymapStore.current()
+        fun keys(vararg actions: Shortcut) = actions.map { keymap.chord(it).label() }
+        val groups = listOf(
+            net.ithandsfree.softphone.win.ui.SheetGroup(
+                ShortcutGroup.ANYWHERE.title,
+                listOf(
+                    "Search or dial" to keys(Shortcut.SEARCH),
+                    "Switch to line 1 / line 2" to keys(Shortcut.LINE_1, Shortcut.LINE_2),
+                    "New message" to keys(Shortcut.NEW_MESSAGE),
+                    "Toggle Do not disturb (active line)" to keys(Shortcut.TOGGLE_DND),
+                    "Calls · Messages · Lines · Settings" to tabKeys(keymap),
+                    "This sheet" to listOf("?"),
+                ),
+            ),
+            net.ithandsfree.softphone.win.ui.SheetGroup(
+                ShortcutGroup.CALLS.title,
+                listOf(
+                    Shortcut.CALL_ANSWER, Shortcut.END_DECLINE, Shortcut.MUTE, Shortcut.HOLD, Shortcut.TRANSFER, Shortcut.KEYPAD,
+                ).map { it.label to keys(it) },
+            ),
+            net.ithandsfree.softphone.win.ui.SheetGroup(
+                ShortcutGroup.MESSAGES.title,
+                FIXED_SHORTCUTS.filter { it.first == ShortcutGroup.MESSAGES }.map { it.second to listOf(it.third) } +
+                    ("Next / previous thread" to keys(Shortcut.NEXT_THREAD, Shortcut.PREVIOUS_THREAD)),
+            ),
+            net.ithandsfree.softphone.win.ui.SheetGroup(
+                if (keymap.globalEnabled) "System-wide (on)" else ShortcutGroup.SYSTEM.title,
+                listOf(Shortcut.GLOBAL_ANSWER, Shortcut.GLOBAL_HANG_UP, Shortcut.GLOBAL_MUTE).map { it.label to keys(it) },
+                note = "Turn on in Settings › Keyboard shortcuts. Every shortcut can be remapped there.",
+            ),
         )
-        dialog.rootPane.actionMap.put("close-shortcuts", object : javax.swing.AbstractAction() {
-            override fun actionPerformed(event: java.awt.event.ActionEvent) = dialog.dispose()
-        })
-        dialog.pack()
-        dialog.setSize(UiScale.px(460), dialog.height.coerceAtLeast(UiScale.px(360)))
-        dialog.setLocationRelativeTo(this)
-        dialog.isVisible = true
+        net.ithandsfree.softphone.win.ui.ShortcutSheet.show(rootPane, tokens, groups)
+    }
+
+    /** "Alt 1 … Alt 4" when the tab keys are still a run; otherwise each one. */
+    private fun tabKeys(keymap: Keymap): List<String> {
+        val tabs = listOf(Shortcut.TAB_CALLS, Shortcut.TAB_MESSAGES, Shortcut.TAB_LINES, Shortcut.TAB_SETTINGS)
+        val labels = tabs.map { keymap.chord(it).label() }
+        return if (tabs.all { keymap.isDefault(it) }) listOf(labels.first(), "…", labels.last()) else labels
     }
 
     private fun quitPhone() {
         CallRinger.stop()
         runCatching { SipBridge.stop() }
+        GlobalHotkeys.stop()
         dispose()
         kotlin.system.exitProcess(0)
     }
@@ -737,6 +1107,7 @@ class PhoneFrame(
         pasteRow.add(paste, java.awt.BorderLayout.CENTER)
         pasteRow.add(ghost("Continue", expand = false) { enrolFrom(paste.text) }, java.awt.BorderLayout.EAST)
         grow(body, pasteRow)
+        grow(body, ghost("Sign in with your user account") { openSignIn(null) }, 8)
         welcomeBack = ghost("Back to the phone", expand = false) { leaveSetup() }
         welcomeBack.isVisible = false
         grow(body, welcomeBack, 8)
@@ -822,6 +1193,87 @@ class PhoneFrame(
         return page
     }
 
+    private fun openSignIn(extension: String?) {
+        signInFor = extension
+        signInIntro.text = if (extension == null) {
+            "<html><body style='width:400px'>Use the username and password from your administrator. " +
+                "This PC keeps them, sealed to your Windows account, so messages keep working.</body></html>"
+        } else {
+            "<html><body style='width:400px'>Line $extension was set up from a link. Sign in so its messages " +
+                "keep working after the link expires. Calls already work.</body></html>"
+        }
+        signInError.text = " "
+        signInPassword.text = ""
+        showRoot("signin")
+        signInUser.requestFocusInWindow()
+    }
+
+    private fun signInPage(): JPanel {
+        val page = column()
+        page.border = javax.swing.border.EmptyBorder(0, 0, 16, 0)
+        page.add(banner("Sign", "in.", compact = true, onBack = { leaveSetup() }))
+        val body = column()
+        signInIntro.foreground = muted
+        body.add(pin(signInIntro))
+        body.add(Box.createVerticalStrut(10))
+        body.add(pin(label("Username")))
+        body.add(pin(signInUser))
+        body.add(pin(label("Password")))
+        body.add(pin(signInPassword))
+        body.add(pin(signInError))
+        val submit = primary("Sign in") { submitSignIn() }
+        signInPassword.addActionListener { submitSignIn() }
+        body.add(pin(submit))
+        body.add(Box.createVerticalStrut(8))
+        body.add(footer("Back", profile.footerCaption) { leaveSetup() })
+        page.add(body)
+        return page
+    }
+
+    private fun submitSignIn() {
+        val user = signInUser.text.trim()
+        val password = String(signInPassword.password)
+        if (user.isBlank() || password.isEmpty()) {
+            signInError.text = "Enter your username and password"
+            return
+        }
+        signInError.text = " "
+        val target = signInFor
+        io.submit {
+            try {
+                if (target == null) {
+                    val added = session.signIn(user, password)
+                    note("Signed in. Line ${added.extension} added")
+                    askedRegister = true
+                    session.register(added, userAgent = "${profile.userAgentName}/0.1.0 PJSUA")
+                    SwingUtilities.invokeLater {
+                        signInPassword.text = ""
+                        paintedLines = ""
+                        showRoot("app")
+                        refreshLine()
+                        showTab("calls")
+                    }
+                } else {
+                    session.attachSignIn(target, user, password)
+                    note("Messages on $target now use your sign-in")
+                    SwingUtilities.invokeLater {
+                        signInPassword.text = ""
+                        paintedLines = ""
+                        refreshLine()
+                        showRoot("app")
+                        showTab("lines")
+                    }
+                }
+            } catch (err: Exception) {
+                val shown = when ((err as? BffException)?.httpCode) {
+                    401 -> "Username or password is not right"
+                    else -> err.message ?: err.javaClass.simpleName
+                }
+                SwingUtilities.invokeLater { signInError.text = shown }
+            }
+        }
+    }
+
     private fun advanced(): JPanel {
         val api = field().apply { text = host.apiBase }
         val sip = field().apply { text = host.sipDomain }
@@ -852,7 +1304,7 @@ class PhoneFrame(
     private fun appShell(): JPanel {
         val shell = JPanel(BorderLayout())
         shell.background = ground
-        shell.add(desktopHeader(), BorderLayout.NORTH)
+        shell.border = BorderFactory.createMatteBorder(1, 0, 0, 0, tokens.divider)
         val body = JPanel(BorderLayout())
         body.background = ground
         body.add(nav(), BorderLayout.WEST)
@@ -861,29 +1313,18 @@ class PhoneFrame(
         appBody.add(messages(), "messages")
         appBody.add(thread(), "thread")
         appBody.add(lines(), "lines")
-        appBody.add(scroll(settings()), "settings")
+        appBody.add(settings(), "settings")
         body.add(appBody, BorderLayout.CENTER)
         shell.add(body, BorderLayout.CENTER)
+        bottomNav = net.ithandsfree.softphone.win.ui.BottomNav(tokens, navItems()) { id -> pickTab(id) }
+        bottomNav.isVisible = false
+        shell.add(bottomNav, BorderLayout.SOUTH)
         showTab("calls")
         return shell
     }
 
-    private fun desktopHeader(): JPanel {
-        val bar = JPanel(BorderLayout(16, 0))
-        bar.background = ground
-        bar.border = EmptyBorder(10, 16, 10, 16)
-        val brand = JLabel(profile.productName)
-        brand.font = Font("Georgia", Font.PLAIN, UiScale.px(18))
-        brand.foreground = ink
-        bar.add(brand, BorderLayout.WEST)
-        findBox.font = uiFont
-        findBox.background = raised
-        findBox.foreground = ink
-        findBox.caretColor = gold
-        findBox.border = javax.swing.BorderFactory.createCompoundBorder(
-            javax.swing.BorderFactory.createLineBorder(hairline),
-            EmptyBorder(8, 12, 8, 12),
-        )
+    /** Round-3 title bar, embedded in the native one by FlatLaf. Search and line status live here. */
+    private fun installTitleBar() {
         findBox.toolTipText = "Search contacts and messages, or type a number (Ctrl K)"
         findBox.addActionListener { searchOrDial() }
         findBox.document.addDocumentListener(object : javax.swing.event.DocumentListener {
@@ -891,24 +1332,55 @@ class PhoneFrame(
             override fun removeUpdate(event: javax.swing.event.DocumentEvent) = reloadRecents()
             override fun changedUpdate(event: javax.swing.event.DocumentEvent) = reloadRecents()
         })
-        val searchWrap = JPanel(BorderLayout())
-        searchWrap.isOpaque = false
-        searchWrap.border = EmptyBorder(0, 8, 0, 8)
-        searchWrap.add(findBox, BorderLayout.CENTER)
-        bar.add(searchWrap, BorderLayout.CENTER)
-        headerStatus.font = uiBold
-        headerStatus.foreground = gold
-        headerStatus.alignmentX = Component.RIGHT_ALIGNMENT
-        status.font = Font("Segoe UI", Font.PLAIN, UiScale.px(12))
-        status.foreground = caption
-        status.alignmentX = Component.RIGHT_ALIGNMENT
-        val east = JPanel()
-        east.layout = BoxLayout(east, BoxLayout.Y_AXIS)
-        east.isOpaque = false
-        east.add(headerStatus)
-        east.add(status)
-        bar.add(east, BorderLayout.EAST)
-        return bar
+        // Vector brand mark from the design package: sharp at every size and DPI (the PNG app icon has a rim
+        // and pixelates at 18 px).
+        val mark = brandMark(21)
+        titleBar = net.ithandsfree.softphone.win.ui.TitleBar(tokens, profile.productName, mark, findBox)
+        jMenuBar = titleBar
+        titleBar.onPin = { setPinned(!WindowPrefs.pinned()) }
+        titleBar.onExpand = { expandWindow() }
+        titleBar.searchKey(KeymapStore.current().chord(Shortcut.SEARCH).label())
+        rootPane.putClientProperty(com.formdev.flatlaf.FlatClientProperties.TITLE_BAR_SHOW_TITLE, false)
+        rootPane.putClientProperty(com.formdev.flatlaf.FlatClientProperties.TITLE_BAR_SHOW_ICON, false)
+    }
+
+    /** Vector brand mark [height] px tall (title bar, incoming window). */
+    private fun brandMark(height: Int): javax.swing.Icon? = runCatching {
+        if (profile.id == Distribution.IHF) {
+            com.formdev.flatlaf.extras.FlatSVGIcon("brand/ihf-emblem.svg", height * 62 / 52, height)
+        } else {
+            com.formdev.flatlaf.extras.FlatSVGIcon("brand/community-mark.svg", height * 120 / 112, height)
+        }
+    }.getOrNull()
+
+    private var titleKey = ""
+
+    /** Repaints the title bar status only when lines, registration, DND or the call timer changed. */
+    private fun paintTitleStatus(snap: SipBridge.Snapshot, timer: String?) {
+        val lines = session.lines().mapIndexed { index, line ->
+            net.ithandsfree.softphone.win.ui.TitleBar.LineStatus(
+                line.extension,
+                tokens.line(index),
+                if (index == 0) snap.registered else snap.secondRegistered,
+            )
+        }
+        val missed = (if (currentTab == "calls") 0 else missedSinceSeen()) + vmNew.values.sum()
+        val key = "$lines|${WindowPrefs.dnd()}|$timer|$missed"
+        if (key == titleKey) return
+        titleKey = key
+        titleBar.show(lines, WindowPrefs.dnd(), timer)
+        if (::navRail.isInitialized) {
+            navRail.presence(
+                when {
+                    timer != null -> tokens.action
+                    WindowPrefs.dnd() -> tokens.danger
+                    lines.any { it.registered } -> tokens.answer
+                    else -> tokens.textDisabled
+                },
+            )
+            navRail.badge("calls", missed, danger = true)
+        }
+        if (::bottomNav.isInitialized) bottomNav.badge("calls", missed, danger = true)
     }
 
     private fun calls(): JComponent {
@@ -920,64 +1392,58 @@ class PhoneFrame(
         callDetail.add(recentDetail(), "detail")
         page.add(recentsColumn().also { recentsPane = it }, BorderLayout.WEST)
         page.add(callDetail, BorderLayout.CENTER)
+        callsPage = page
         return page
     }
 
     private fun recentsColumn(): JPanel {
         val col = JPanel(BorderLayout())
         col.background = ground
-        col.preferredSize = Dimension(UiScale.px(392), 200)
-        col.border = BorderFactory.createCompoundBorder(
-            BorderFactory.createMatteBorder(0, 0, 0, 1, hairline),
-            EmptyBorder(20, 20, 16, 16),
-        )
-        val head = stack()
-        head.border = EmptyBorder(0, 0, 0, 0)
-        grow(head, JLabel("Calls").apply { font = serif; foreground = ink }, 12)
-        lineChip.font = uiBold
-        lineChip.foreground = emerald
-        lineSwitch.isOpaque = false
-        lineSwitch.alignmentX = Component.LEFT_ALIGNMENT
-        historyFilters.isOpaque = false
-        historyFilters.alignmentX = Component.LEFT_ALIGNMENT
-        grow(head, lineSwitch, 8)
-        activeCallRow.isVisible = false
-        grow(head, activeCallRow, 8)
-        allRecentButton.addActionListener {
-            missedOnly = false
-            historyExtension = null
-            styleRecentFilters()
-            reloadRecents()
-        }
-        missedRecentButton.addActionListener {
-            missedOnly = true
-            historyExtension = null
-            styleRecentFilters()
-            reloadRecents()
-        }
-        keypadJump.isContentAreaFilled = false
-        keypadJump.isBorderPainted = false
-        keypadJump.font = uiBold
-        keypadJump.foreground = muted
+        col.preferredSize = Dimension(net.ithandsfree.softphone.win.ui.Space.LIST_W, 200)
+        col.minimumSize = Dimension(320, 200)
+        col.border = BorderFactory.createMatteBorder(0, 0, 0, 1, tokens.divider)
+        val head = JPanel()
+        head.layout = BoxLayout(head, BoxLayout.Y_AXIS)
+        head.isOpaque = false
+        head.border = EmptyBorder(14, 16, 6, 16)
+        fun left(c: JComponent) = c.also { it.alignmentX = Component.LEFT_ALIGNMENT }
+        head.add(left(callsTitle.apply {
+            font = net.ithandsfree.softphone.win.ui.Type.display(net.ithandsfree.softphone.win.ui.Type.TITLE)
+            foreground = ink
+            border = EmptyBorder(0, 0, 10, 0)
+        }))
+        head.add(left(lineRail))
+        activeCard.alignmentX = Component.LEFT_ALIGNMENT
+        head.add(Box.createVerticalStrut(8))
+        head.add(activeCard)
         keypadJump.addActionListener {
             narrowList = false
             applyWindowShape()
         }
-        callTabs.layout = java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 12, 0)
-        callTabs.isOpaque = false
-        callTabs.alignmentX = Component.LEFT_ALIGNMENT
-        listOf("recents" to "Recents", "contacts" to "Contacts", "voicemail" to "Voicemail").forEach { (id, title) ->
-            val tab = JButton(title)
-            tab.putClientProperty("callsView", id)
-            tab.isContentAreaFilled = false
-            tab.isBorderPainted = false
-            tab.isFocusPainted = false
-            tab.font = uiBold
-            tab.addActionListener { showCallsView(id) }
-            callTabs.add(tab)
+        callsTabs = net.ithandsfree.softphone.win.ui.UnderlineTabs(
+            tokens,
+            listOf("keypad" to "Keypad", "recents" to "Recents", "contacts" to "Contacts", "voicemail" to "Voicemail"),
+        ) { id ->
+            if (id == "keypad") {
+                // Compact window only: the keypad replaces the list.
+                if (detailOpen) closeRecentDetail()
+                narrowList = false
+                applyWindowShape()
+            } else {
+                narrowList = true
+                showCallsView(id)
+                applyWindowShape()
+            }
         }
-        grow(head, callTabs, 8)
-        grow(head, historyFilters, 8)
+        callsTabs.only(listOf("recents", "contacts", "voicemail"))
+        callsTabs.maximumSize = Dimension(Int.MAX_VALUE, 44)
+        head.add(Box.createVerticalStrut(8))
+        head.add(left(callsTabs))
+        historyFilters.layout = net.ithandsfree.softphone.win.ui.WrapLayout(java.awt.FlowLayout.LEFT, 8, 6)
+        historyFilters.isOpaque = false
+        historyFilters.border = EmptyBorder(6, 0, 0, 0)
+        historyFilters.maximumSize = Dimension(Int.MAX_VALUE, Int.MAX_VALUE)
+        head.add(left(historyFilters))
         col.add(head, BorderLayout.NORTH)
         recentRows.layout = BoxLayout(recentRows, BoxLayout.Y_AXIS)
         recentRows.background = ground
@@ -985,6 +1451,8 @@ class PhoneFrame(
         scroll.border = EmptyBorder(0, 0, 0, 0)
         scroll.background = ground
         scroll.viewport.background = ground
+        scroll.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        scroll.verticalScrollBar.unitIncrement = 16
         recentEmpty.alignmentX = Component.LEFT_ALIGNMENT
         val recentsBody = JPanel(BorderLayout())
         recentsBody.background = ground
@@ -996,9 +1464,7 @@ class PhoneFrame(
         contactsScroll.border = EmptyBorder(0, 0, 0, 0)
         contactsScroll.background = ground
         contactsScroll.viewport.background = ground
-        val voicemail = JPanel(BorderLayout())
-        voicemail.background = ground
-        voicemail.add(label("Voicemail is not on this phone yet."), BorderLayout.NORTH)
+        val voicemail = voicemailView()
         callsBody.background = ground
         callsBody.add(recentsBody, "recents")
         callsBody.add(contactsScroll, "contacts")
@@ -1010,26 +1476,17 @@ class PhoneFrame(
     }
 
     private fun keypadColumn(): JPanel {
-        val box = JPanel()
-        box.layout = BoxLayout(box, BoxLayout.Y_AXIS)
-        box.background = ground
-        box.border = EmptyBorder(16, 24, 12, 24)
-        val recents = ghost("Recents", expand = false) {
-            narrowList = true
-            applyWindowShape()
-        }
-        recents.alignmentX = Component.CENTER_ALIGNMENT
-        box.add(recents)
-        box.add(Box.createVerticalStrut(8))
-        dial.font = Font("Consolas", Font.PLAIN, UiScale.px(52))
-        dial.preferredSize = Dimension(460, UiScale.px(72))
-        dial.maximumSize = Dimension(560, UiScale.px(72))
-        dial.horizontalAlignment = JTextField.CENTER
-        dial.background = ground
-        dial.caretColor = gold
-        dial.foreground = ink
-        dial.border = EmptyBorder(4, 8, 4, 8)
-        dial.alignmentX = Component.CENTER_ALIGNMENT
+        dialPad = net.ithandsfree.softphone.win.ui.DialPad(
+            tokens,
+            dial,
+            onKey = { digit ->
+                KeyTone.play(digit)
+                dial.text += digit
+                dial.requestFocusInWindow()
+            },
+            onCall = { placeCall() },
+            onErase = { eraseDialDigit() },
+        )
         dial.document.addDocumentListener(object : javax.swing.event.DocumentListener {
             private var updating = false
             override fun insertUpdate(event: javax.swing.event.DocumentEvent) = restyleDial()
@@ -1039,143 +1496,148 @@ class PhoneFrame(
                 if (updating) return
                 val raw = dial.text.filter { it.isDigit() || it == '*' || it == '#' || it == '+' }
                 val shown = formatDialDigits(raw)
-                val size = UiScale.px(dialTypeSize(raw))
-                dial.font = Font("Consolas", Font.PLAIN, size)
-                val height = size + UiScale.px(20)
-                dial.maximumSize = Dimension(560, height)
-                dial.preferredSize = Dimension(460, height)
+                // 36 px design size for a normal number, stepping down for long pastes (52/40/28 in PhoneRules).
+                val size = dialTypeSize(raw) * (if (compactMode) 30f else 36f) / 52f
+                dial.font = net.ithandsfree.softphone.win.ui.Type.mono(size)
+                dialPad.eraseVisible(raw.isNotEmpty())
+                val match = if (raw.length >= 3) ContactBook.match(raw).firstOrNull() else null
+                dialPad.contact(match?.name, match?.let { displayNumber(it.number) })
                 if (dial.text != shown) {
-                    updating = true
-                    dial.text = shown
-                    updating = false
+                    SwingUtilities.invokeLater {
+                        updating = true
+                        dial.text = shown
+                        updating = false
+                    }
                 }
             }
         })
         dial.addActionListener { placeCall() }
-        fromLine.font = Font("Segoe UI", Font.PLAIN, UiScale.px(13))
-        fromLine.foreground = muted
-        fromLine.alignmentX = Component.CENTER_ALIGNMENT
-        callState.alignmentX = Component.CENTER_ALIGNMENT
-        val keys = JPanel(GridLayout(4, 3, 10, 10))
-        keys.background = ground
-        keys.preferredSize = Dimension(UiScale.px(280), UiScale.px(280))
-        keys.minimumSize = Dimension(UiScale.px(240), UiScale.px(240))
-        keys.maximumSize = Dimension(UiScale.px(320), UiScale.px(320))
-        keys.alignmentX = Component.CENTER_ALIGNMENT
-        val letters = mapOf(
-            "2" to "ABC", "3" to "DEF", "4" to "GHI", "5" to "JKL",
-            "6" to "MNO", "7" to "PQRS", "8" to "TUV", "9" to "WXYZ", "0" to "+",
-        )
-        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#").forEach { digit ->
-            keys.add(DialKey(digit, letters[digit].orEmpty(), raised, ink, caption, gold) {
-                KeyTone.play(digit)
-                dial.text += digit
-            })
-        }
-        callButton.alignmentX = Component.CENTER_ALIGNMENT
-        callButton.maximumSize = Dimension(260, 52)
-        answerButton.alignmentX = Component.CENTER_ALIGNMENT
-        declineButton.alignmentX = Component.CENTER_ALIGNMENT
-        hangButton.alignmentX = Component.CENTER_ALIGNMENT
-        val hint = JLabel("Type or paste a number, then Enter.")
-        hint.font = Font("Segoe UI", Font.PLAIN, UiScale.px(12))
-        hint.foreground = caption
-        hint.alignmentX = Component.CENTER_ALIGNMENT
-        box.add(dial)
-        box.add(Box.createVerticalStrut(6))
-        box.add(fromLine)
-        box.add(Box.createVerticalStrut(4))
-        box.add(callState)
-        box.add(Box.createVerticalStrut(18))
-        box.add(keys)
-        box.add(Box.createVerticalStrut(16))
-        val dialRow = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.CENTER, 12, 0))
-        dialRow.isOpaque = false
-        dialRow.alignmentX = Component.CENTER_ALIGNMENT
-        dialRow.maximumSize = Dimension(420, 64)
-        val erase = ghost("Delete", expand = false) { eraseDialDigit() }
-        erase.toolTipText = "Delete the last digit"
-        dialRow.add(callButton)
-        dialRow.add(erase)
-        box.add(dialRow)
-        box.add(Box.createVerticalStrut(12))
-        box.add(hint)
+        dialPad.eraseVisible(false)
+        val box = JPanel(BorderLayout())
+        box.background = ground
+        // Scrolls only when the window is shorter than the pad; otherwise the glue keeps it centred.
+        val scroll = JScrollPane(dialPad)
+        scroll.border = EmptyBorder(0, 0, 0, 0)
+        scroll.viewport.background = ground
+        scroll.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        scroll.verticalScrollBar.unitIncrement = 16
+        box.add(scroll, BorderLayout.CENTER)
+        callButton.isVisible = false
         return box
     }
 
     private fun inCallColumn(): JPanel {
-        val box = JPanel()
-        box.layout = BoxLayout(box, BoxLayout.Y_AXIS)
-        box.background = ground
-        box.border = EmptyBorder(48, 24, 24, 24)
-        inCallClock.font = Font("Consolas", Font.PLAIN, UiScale.px(22))
-        inCallClock.foreground = gold
-        inCallClock.alignmentX = Component.CENTER_ALIGNMENT
-        answerButton.alignmentX = Component.CENTER_ALIGNMENT
-        declineButton.alignmentX = Component.CENTER_ALIGNMENT
-        hangButton.alignmentX = Component.CENTER_ALIGNMENT
-        hangButton.preferredSize = Dimension(180, 52)
-        hangButton.maximumSize = Dimension(220, 52)
-        muteButton.alignmentX = Component.CENTER_ALIGNMENT
-        holdButton.alignmentX = Component.CENTER_ALIGNMENT
-        transferButton.alignmentX = Component.CENTER_ALIGNMENT
-        keypadButton.alignmentX = Component.CENTER_ALIGNMENT
-        answerButton.isVisible = false
-        declineButton.isVisible = false
-        hangButton.isVisible = false
-        muteButton.isVisible = false
-        holdButton.isVisible = false
-        transferButton.isVisible = false
-        keypadButton.isVisible = false
-        val letters = mapOf(
-            "2" to "ABC", "3" to "DEF", "4" to "GHI", "5" to "JKL",
-            "6" to "MNO", "7" to "PQRS", "8" to "TUV", "9" to "WXYZ", "0" to "+",
-        )
-        dtmfPad.background = ground
-        dtmfPad.preferredSize = Dimension(UiScale.px(280), UiScale.px(248))
-        dtmfPad.minimumSize = Dimension(UiScale.px(240), UiScale.px(220))
-        dtmfPad.maximumSize = Dimension(UiScale.px(320), UiScale.px(280))
-        dtmfPad.alignmentX = Component.CENTER_ALIGNMENT
-        dtmfPad.isVisible = false
-        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#").forEach { digit ->
-            dtmfPad.add(DialKey(digit, letters[digit].orEmpty(), raised, ink, caption, gold) {
-                KeyTone.play(digit)
-                sendDtmf(digit)
-            })
+        val pad = net.ithandsfree.softphone.win.ui.padGrid(tokens) { digit ->
+            KeyTone.play(digit)
+            sendDtmf(digit)
         }
-        val controls = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.CENTER, 8, 0))
-        controls.background = ground
-        controls.alignmentX = Component.CENTER_ALIGNMENT
-        controls.maximumSize = Dimension(760, 110)
-        hangButton.toolTipText = "End (Ctrl D)"
-        controls.add(callControl(muteButton, "M"))
-        controls.add(callControl(holdButton, "H"))
-        controls.add(callControl(transferButton, "T"))
-        controls.add(callControl(keypadButton, "K"))
-        controls.add(callControl(hangButton, "Ctrl D"))
-        box.add(Box.createVerticalGlue())
-        box.add(inCallParty)
-        box.add(Box.createVerticalStrut(10))
-        box.add(inCallClock)
-        box.add(Box.createVerticalStrut(16))
+        val dtmfSlot = JPanel(BorderLayout())
+        dtmfSlot.isOpaque = false
+        dtmfSlot.add(pad, BorderLayout.CENTER)
+        dtmfSlot.maximumSize = Dimension(240, 264)
+        dtmfSlot.isVisible = false
+        dtmfHolder = dtmfSlot
         headsetOffer = ghost("Use headset", expand = false) { useOfferedHeadset() }
         headsetOffer.isVisible = false
-        headsetOffer.alignmentX = Component.CENTER_ALIGNMENT
-        box.add(headsetOffer)
-        box.add(Box.createVerticalStrut(16))
-        box.add(answerButton)
-        box.add(Box.createVerticalStrut(8))
-        box.add(declineButton)
-        val callSpeaker = audioCombo(speakerModel) { useSelectedSpeaker() }
-        callSpeaker.alignmentX = Component.CENTER_ALIGNMENT
-        callSpeaker.maximumSize = Dimension(360, 40)
-        box.add(controls)
-        box.add(Box.createVerticalStrut(12))
-        box.add(callSpeaker)
-        box.add(Box.createVerticalStrut(12))
-        box.add(dtmfPad)
-        box.add(Box.createVerticalGlue())
+        inCallPane = net.ithandsfree.softphone.win.ui.InCallPane(tokens, object : net.ithandsfree.softphone.win.ui.InCallPane.Actions {
+            override fun answer() = work("Answer") { session.answer(); note("Answered") }
+            override fun decline() = work("Decline") {
+                if (SipBridge.snapshot().incoming) session.decline() else session.hangup()
+            }
+            override fun mute() = toggleMute()
+            override fun hold() = toggleHold()
+            override fun transfer() = openTransfer()
+            override fun keypad() = toggleDtmfPad()
+            override fun end() = work("Hang up") { session.hangup() }
+            override fun device(anchor: JComponent) = pickCallDevice(anchor)
+        }, dtmfSlot)
+        val box = JPanel(BorderLayout())
+        box.background = ground
+        callWaitingBar = net.ithandsfree.softphone.win.ui.CallWaitingBar(
+            tokens,
+            onAnswer = { answerWaiting() },
+            onEnd = { work("Second call") { session.waitingEnd() } },
+            onSwap = { work("Swap") { session.swapCalls(); note("Swapped calls") } },
+        )
+        box.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = EmptyBorder(14, 18, 0, 18)
+            add(callWaitingBar, BorderLayout.CENTER)
+        }, BorderLayout.NORTH)
+        box.add(inCallPane, BorderLayout.CENTER)
+        val offer = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.CENTER))
+        offer.isOpaque = false
+        offer.add(headsetOffer)
+        box.add(offer, BorderLayout.SOUTH)
         return box
+    }
+
+    /** Speaker list under the device row; switching never drops the call (previous pair restored on failure). */
+    private fun pickCallDevice(anchor: JComponent) {
+        if (speakerModel.size == 0) loadAudioDevices()
+        val menu = javax.swing.JPopupMenu()
+        for (i in 0 until speakerModel.size) {
+            val device = speakerModel.getElementAt(i)
+            val shown = if (device.name.contains("wave mapper", ignoreCase = true)) "Windows default" else device.name
+            val item = javax.swing.JCheckBoxMenuItem(shown, device == speakerModel.selectedItem)
+            item.font = net.ithandsfree.softphone.win.ui.Type.ui(net.ithandsfree.softphone.win.ui.Type.LABEL + 1)
+            item.addActionListener {
+                speakerModel.selectedItem = device
+                useSelectedSpeaker()
+            }
+            menu.add(item)
+        }
+        if (speakerModel.size == 0) menu.add(javax.swing.JMenuItem("No sound devices found").apply { isEnabled = false })
+        menu.addSeparator()
+        menu.add(javax.swing.JMenuItem("Call volume").apply { isEnabled = false })
+        CALL_VOLUMES.forEach { (percent, label) ->
+            val item = javax.swing.JCheckBoxMenuItem(label, AudioPrefs.callVolume() == percent)
+            item.font = net.ithandsfree.softphone.win.ui.Type.ui(net.ithandsfree.softphone.win.ui.Type.LABEL + 1)
+            item.addActionListener { setCallVolume(percent) }
+            menu.add(item)
+        }
+        menu.show(anchor, 0, -menu.preferredSize.height - 4)
+    }
+
+    /** Settings › Advanced: zip the diagnostic logs with a short summary (no passwords or tokens) for support. */
+    private fun exportDiagnostics() {
+        val chooser = javax.swing.JFileChooser()
+        chooser.dialogTitle = "Save diagnostic log"
+        chooser.selectedFile = java.io.File(
+            System.getProperty("user.home"),
+            "Desktop${java.io.File.separator}IHF-Phone-log-${java.time.LocalDate.now()}.zip",
+        )
+        if (chooser.showSaveDialog(this) != javax.swing.JFileChooser.APPROVE_OPTION) return
+        val target = chooser.selectedFile.let { if (it.name.endsWith(".zip", true)) it else java.io.File(it.path + ".zip") }
+        val snap = SipBridge.snapshot()
+        val summary = buildString {
+            appendLine("IHF Phone $APP_BUILD (${profile.productName})")
+            appendLine("Saved ${java.time.ZonedDateTime.now()}")
+            appendLine("Windows: ${System.getProperty("os.name")} ${System.getProperty("os.version")} ${System.getProperty("os.arch")}")
+            appendLine("Java: ${System.getProperty("java.version")}")
+            appendLine("Voice engine: ${if (SipBridge.loadError == null) "loaded" else "not loaded"}; transport ${snap.transport?.name ?: "none"}")
+            session.lines().forEachIndexed { index, line ->
+                val up = if (index == 0) snap.registered else snap.secondRegistered
+                appendLine("Line ${index + 1}: ${line.extension} ${if (up) "registered" else "not registered"}${if (line.extension == session.line?.extension) " (default)" else ""}")
+            }
+            appendLine("Microphone: ${AudioPrefs.captureName().ifBlank { "Windows default" }}")
+            appendLine("Speaker: ${AudioPrefs.playbackName().ifBlank { "Windows default" }}")
+            appendLine("Call volume: ${AudioPrefs.callVolume()}%; voice processing ${if (AudioPrefs.voiceProcessing()) "on" else "off"}")
+            appendLine("Do not disturb on this PC: ${WindowPrefs.dnd()}")
+        }
+        work("Save diagnostic log") {
+            val files = DiagLog.export(target, summary)
+            note("Saved $files day${if (files == 1) "" else "s"} of log to ${target.name}")
+        }
+    }
+
+    /** Saves the call volume and applies it to the call in progress (Settings and the in-call device menu). */
+    private fun setCallVolume(percent: Int) {
+        AudioPrefs.saveCallVolume(percent)
+        SipBridge.setCallVolume(percent)
+        val index = CALL_VOLUMES.indexOfFirst { it.first == percent }
+        callVolumeCombo?.let { if (index >= 0 && it.selectedIndex != index) it.selectedIndex = index }
+        note("Call volume: ${CALL_VOLUMES.firstOrNull { it.first == percent }?.second ?: "$percent%"}")
     }
 
     private fun callControl(button: JComponent, shortcut: String): JPanel {
@@ -1193,19 +1655,257 @@ class PhoneFrame(
         return box
     }
 
+    // ---- Voicemail (Calls › Voicemail) -----------------------------------------------------------------------------
+
+    /** Voicemail tab: the PBX mailbox of each line through the BFF, with UCP's Voicemail permissions. */
+    private fun voicemailView(): JComponent {
+        voicemailPane = net.ithandsfree.softphone.win.ui.VoicemailPane(tokens, object : net.ithandsfree.softphone.win.ui.VoicemailPane.Actions {
+            override fun filter(extension: String?) {
+                vmFilter = extension
+                paintVoicemail()
+            }
+            override fun open(id: String) {
+                vmOpen = id
+                paintVoicemail()
+            }
+            override fun playPause(id: String) = playVoicemail(id)
+            override fun seek(id: String, fraction: Double) {
+                if (recordingPlayer.playing == "vm:$id") recordingPlayer.seek(fraction)
+            }
+            override fun callBack(id: String) {
+                val (line, m) = voicemailFor(id) ?: return
+                session.choose(line.extension)
+                dial.text = m.number
+                placeCall()
+            }
+            override fun text(id: String) {
+                val (line, m) = voicemailFor(id) ?: return
+                session.choose(line.extension)
+                startNewMessage()
+                smsTo.text = m.number
+            }
+            override fun save(id: String) = saveVoicemail(id)
+            override fun delete(id: String) = deleteVoicemail(id)
+            override fun callVoicemail(extension: String?) {
+                val ext = extension ?: session.line?.extension ?: return
+                session.choose(ext)
+                dial.text = voicemailDialCode(ext)
+                placeCall()
+            }
+        })
+        return voicemailPane
+    }
+
+    /** The PBX's own "My Voicemail" code for the line; FreePBX's default when the BFF has not said. */
+    private fun voicemailDialCode(ext: String?): String =
+        vmData[ext.orEmpty()]?.dial?.ifBlank { null }
+            ?: vmData.values.firstOrNull { it.dial.isNotBlank() }?.dial
+            ?: "*97"
+
+    /** "ext/id" → the line and message. Ids are only unique within one mailbox. */
+    private fun voicemailFor(key: String): Pair<EnrolledLine, Voicemail>? {
+        val ext = key.substringBefore('/')
+        val id = key.substringAfter('/')
+        val line = session.lines().firstOrNull { it.extension == ext } ?: return null
+        val message = vmData[ext]?.messages?.firstOrNull { it.id == id } ?: return null
+        return line to message
+    }
+
+    /** Reloads every line's mailbox. [quiet] skips the loading state (the 60 s refresh). */
+    private fun loadVoicemail(quiet: Boolean = false) {
+        val lines = session.lines()
+        if (lines.isEmpty()) return
+        if (!quiet && vmData.isEmpty()) {
+            vmLoading = true
+            paintVoicemail()
+        }
+        io.submit {
+            lines.forEach { line ->
+                val label = lineLabel(line.extension)
+                try {
+                    vmData[line.extension] = session.voicemail(line)
+                    vmNotice.remove(line.extension)
+                } catch (err: SignInNeeded) {
+                    vmNotice[line.extension] = err.message.orEmpty()
+                } catch (err: BffException) {
+                    vmData.remove(line.extension)
+                    vmNotice[line.extension] = when {
+                        err.error == "voicemail_disabled" ->
+                            "Voicemail for $label is not turned on for your user (UCP › Voicemail). Ask your administrator."
+                        err.httpCode == 404 -> "This PBX does not offer the voicemail list yet. You can still dial your mailbox."
+                        else -> "Could not load voicemail for $label (${err.error})."
+                    }
+                } catch (err: Exception) {
+                    vmNotice[line.extension] = "Could not load voicemail for $label."
+                    DiagLog.app("voicemail $label: ${err.message}")
+                }
+            }
+            vmLoading = false
+            SwingUtilities.invokeLater {
+                announceNewVoicemail()
+                paintVoicemail()
+            }
+        }
+    }
+
+    /** New-message counts: tab text, Calls badge, and a toast when one arrives (not on the first load). */
+    private fun announceNewVoicemail() {
+        session.lines().forEach { line ->
+            val messages = vmData[line.extension]?.messages ?: return@forEach
+            val fresh = messages.count { it.new }
+            val before = vmNew[line.extension]
+            if (before != null && fresh > before) {
+                val newest = messages.filter { it.new }.maxByOrNull { it.at }
+                val who = newest?.let { m -> ContactBook.nameFor(m.number)?.name ?: callerName(m.name) ?: displayNumber(m.number) }
+                note("New voicemail on ${lineLabel(line.extension)}" + (who?.let { " from $it" } ?: ""))
+            }
+            vmNew[line.extension] = fresh
+        }
+        val total = vmNew.values.sum()
+        if (::callsTabs.isInitialized) callsTabs.rename("voicemail", if (total > 0) "Voicemail · $total" else "Voicemail")
+        titleKey = ""
+    }
+
+    private fun paintVoicemail() {
+        if (!::voicemailPane.isInitialized) return
+        val lines = session.lines()
+        val rows = lines.flatMapIndexed { index, line ->
+            val label = lineLabel(line.extension)
+            val caps = lineCaps[line.extension]
+            vmData[line.extension]?.messages.orEmpty().map { m ->
+                val person = ContactBook.nameFor(m.number)?.name
+                val callable = recentCanCall(m.number)
+                val title = person ?: callerName(m.name) ?: if (callable) displayNumber(m.number) else "Unknown caller"
+                val block = recentTextBlock(m.number) ?: if (caps?.sms == false) "Text is off on $label (admin)." else null
+                Triple(m.new, m.at, net.ithandsfree.softphone.win.ui.VoicemailPane.Item(
+                    id = "${line.extension}/${m.id}",
+                    extension = line.extension,
+                    lineLabel = label,
+                    lineColorIndex = index,
+                    title = title,
+                    titleIsNumber = person == null && callerName(m.name) == null && callable,
+                    whenText = formatVoicemailWhen(m.at * 1000),
+                    durationText = formatSeconds(m.duration),
+                    isNew = m.new,
+                    textBlock = block,
+                    canCall = callable,
+                ))
+            }
+        }.sortedWith(compareByDescending<Triple<Boolean, Long, net.ithandsfree.softphone.win.ui.VoicemailPane.Item>> { it.first }.thenByDescending { it.second })
+            .map { it.third }
+        val mailboxExt = vmFilter ?: session.line?.extension
+        voicemailPane.show(
+            net.ithandsfree.softphone.win.ui.VoicemailPane.Model(
+                items = rows,
+                filters = listOf(Triple<String?, String, Int>(null, "All lines", -1)) +
+                    lines.mapIndexed { index, line -> Triple<String?, String, Int>(line.extension, lineLabel(line.extension), index) },
+                filter = vmFilter,
+                open = vmOpen,
+                notice = vmNotice.values.distinct().joinToString("<br>").ifBlank { null },
+                loading = vmLoading,
+                mailboxLabel = mailboxExt?.let { lineLabel(it) },
+                dialCode = voicemailDialCode(mailboxExt),
+            ),
+        )
+    }
+
+    private fun playVoicemail(key: String) {
+        val playKey = "vm:$key"
+        if (recordingPlayer.playing == playKey) {
+            if (recordingPlayer.paused) recordingPlayer.resume() else recordingPlayer.pause()
+            startVoicemailProgress()
+            return
+        }
+        val snap = SipBridge.snapshot()
+        if (snap.callActive || snap.incoming) {
+            note("Finish the call to play voicemail")
+            return
+        }
+        val (line, message) = voicemailFor(key) ?: return
+        vmOpen = key
+        work("Voicemail") {
+            val audio = synchronized(vmAudio) { vmAudio[key] } ?: session.voicemailAudio(line, message.id).also { bytes ->
+                synchronized(vmAudio) {
+                    vmAudio[key] = bytes
+                    while (vmAudio.size > 6) vmAudio.remove(vmAudio.keys.first())
+                }
+            }
+            SwingUtilities.invokeLater {
+                recordingPlayer.play(playKey, audio, AudioPrefs.playbackName()) {
+                    SwingUtilities.invokeLater { voicemailPane.progress(key, 0, 0, false) }
+                }
+                startVoicemailProgress()
+            }
+            if (message.new) {
+                session.voicemailHeard(line, message.id)
+                loadVoicemail(quiet = true)
+            }
+        }
+    }
+
+    /** Moves the open player's scrubber while a voicemail plays. */
+    private fun startVoicemailProgress() {
+        if (vmProgress?.isRunning == true) return
+        vmProgress = Timer(200) {
+            val key = recordingPlayer.playing?.takeIf { it.startsWith("vm:") }?.removePrefix("vm:")
+            val p = recordingPlayer.progress()
+            if (key == null || p == null) {
+                vmProgress?.stop()
+                vmOpen?.let { voicemailPane.progress(it, 0, 0, false) }
+            } else {
+                voicemailPane.progress(key, p.first, p.second, !recordingPlayer.paused)
+            }
+        }.apply { start() }
+    }
+
+    private fun saveVoicemail(key: String) {
+        val (line, message) = voicemailFor(key) ?: return
+        val chooser = javax.swing.JFileChooser()
+        chooser.dialogTitle = "Save voicemail"
+        val stamp = java.time.Instant.ofEpochSecond(message.at).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+        val who = message.number.filter { it.isLetterOrDigit() }.ifBlank { "unknown" }
+        chooser.selectedFile = java.io.File("Voicemail $who $stamp.wav")
+        if (chooser.showSaveDialog(this) != javax.swing.JFileChooser.APPROVE_OPTION) return
+        val target = chooser.selectedFile.let { if (it.name.endsWith(".wav", true)) it else java.io.File(it.path + ".wav") }
+        work("Save voicemail") {
+            target.writeBytes(session.voicemailAudio(line, message.id, download = true))
+            note("Saved ${target.name}")
+        }
+    }
+
+    private fun deleteVoicemail(key: String) {
+        val (line, message) = voicemailFor(key) ?: return
+        // One delete per message: a quick second press must not send a second request.
+        if (!vmDeleting.add(key)) return
+        if (recordingPlayer.playing == "vm:$key") recordingPlayer.stop()
+        work("Delete voicemail") {
+            try {
+                session.deleteVoicemail(line, message.id)
+            } finally {
+                vmDeleting.remove(key)
+            }
+            synchronized(vmAudio) { vmAudio.remove(key) }
+            vmData[line.extension]?.let { r -> vmData[line.extension] = r.copy(messages = r.messages.filter { it.id != message.id }) }
+            SwingUtilities.invokeLater {
+                if (vmOpen == key) vmOpen = null
+                paintVoicemail()
+            }
+            note("Voicemail deleted")
+            loadVoicemail(quiet = true)
+        }
+    }
+
     private fun showCallsView(name: String) {
         callsView = name
         (callsBody.layout as java.awt.CardLayout).show(callsBody, name)
         historyFilters.isVisible = name == "recents"
         styleCallTabs()
         if (name == "contacts") reloadContacts()
+        if (name == "voicemail") loadVoicemail()
     }
 
     private fun styleCallTabs() {
-        callTabs.components.filterIsInstance<JButton>().forEach { button ->
-            val on = button.getClientProperty("callsView") == callsView
-            button.foreground = if (on) gold else muted
-        }
+        if (::callsTabs.isInitialized) callsTabs.select(callsView)
     }
 
     private fun reloadContacts() {
@@ -1221,86 +1921,138 @@ class PhoneFrame(
     }
 
     private fun styleRecentFilters() {
-        historyFilters.components.filterIsInstance<JButton>().forEach { button ->
-            val token = button.getClientProperty("history") as? String
-            val on = when (token) {
+        historyFilters.components.filterIsInstance<net.ithandsfree.softphone.win.ui.Chip>().forEach { chip ->
+            val token = chip.getClientProperty("history") as? String
+            chip.selected2 = when (token) {
                 "missed" -> missedOnly
                 "all" -> !missedOnly && historyExtension == null
                 else -> !missedOnly && historyExtension == token
             }
-            button.isContentAreaFilled = false
-            button.isBorderPainted = false
-            button.isFocusPainted = false
-            button.font = uiBold
-            button.foreground = if (on) gold else muted
-            button.background = ground
         }
     }
 
+    /** Name shown for a line: its extension ("9333"), unless the owner gave it a custom name on the Lines page. */
+    private fun lineLabel(extension: String?): String {
+        val lines = session.lines()
+        val index = lines.indexOfFirst { it.extension == extension }
+        if (index < 0) return extension ?: "this line"
+        return lines[index].label.ifBlank { lines[index].extension }
+    }
+
+    private fun lineIndex(extension: String?): Int? =
+        session.lines().indexOfFirst { it.extension == extension }.takeIf { it >= 0 }
+
+    /** Line rail, Ctrl 1 / Ctrl 2: the line new calls and messages use. */
+    private fun pickLine(extension: String) {
+        if (session.line?.extension == extension) return
+        session.choose(extension)
+        val shown = lineLabel(extension)
+        note(if (shown == extension) "Calls and messages use $extension" else "Calls and messages use $shown ($extension)")
+        threadSignature = ""
+        refreshThreads()
+        paintLineControls(SipBridge.snapshot())
+    }
+
+    private fun threadView(row: ThreadInfo): net.ithandsfree.softphone.win.ui.ThreadView {
+        val person = ContactBook.nameFor(row.peer)
+        val title = person?.name ?: displayNumber(row.peer).ifBlank { "Unknown" }
+        val snippet = row.snippet.orEmpty().trim()
+        val photoOnly = snippet.isBlank() || snippet.equals("photo", ignoreCase = true) || snippet.startsWith("[media")
+        return net.ithandsfree.softphone.win.ui.ThreadView(
+            title = title,
+            titleIsNumber = person == null,
+            preview = if (photoOnly) "Photo" else snippet.replace('\n', ' ').take(90),
+            previewIcon = if (photoOnly) "image" else null,
+            whenText = epochMsOf(row.lastMessageAt)?.let { formatRecentWhen(it) }.orEmpty(),
+            unread = row.unread,
+        )
+    }
+
     private fun messages(): JPanel {
-        threadList.fixedCellHeight = 64
+        val t = tokens
+        threadList.fixedCellHeight = 68
         threadList.background = ground
-        threadList.cellRenderer = object : javax.swing.DefaultListCellRenderer() {
-            override fun getListCellRendererComponent(
-                list: JList<*>,
-                value: Any?,
-                index: Int,
-                isSelected: Boolean,
-                cellHasFocus: Boolean,
-            ): Component {
-                val row = value as? ThreadInfo
-                val label = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus) as JLabel
-                label.border = EmptyBorder(8, 12, 8, 12)
-                label.font = uiFont
-                if (row == null) {
-                    label.text = ""
-                } else {
-                    val preview = row.snippet?.take(80).orEmpty()
-                    label.text = "<html><b>${escapeHtml(row.peer.ifBlank { "Unknown" })}</b><br><span style='color:#8491AD'>${escapeHtml(preview)}</span></html>"
-                }
-                return label
-            }
-        }
+        threadList.border = EmptyBorder(0, 0, 0, 0)
+        threadList.cellRenderer = net.ithandsfree.softphone.win.ui.ThreadCell<ThreadInfo>(t) { threadView(it) }
+        threadList.getAccessibleContext().accessibleName = "Conversations"
+
         val listCol = JPanel(BorderLayout())
         listCol.background = ground
-        listCol.preferredSize = Dimension(UiScale.px(320), 200)
-        listCol.border = BorderFactory.createMatteBorder(0, 0, 0, 1, hairline)
-        val head = stack()
-        head.border = EmptyBorder(20, 16, 8, 12)
-        grow(head, JLabel("Messages").apply { font = serif; foreground = ink }, 8)
-        messageLine.font = uiBold
-        messageLine.foreground = emerald
-        grow(head, messageLine, 8)
-        grow(head, ghost("New message", expand = false) {
-            threadList.clearSelection()
-            smsTo.text = ""
-            threadTitle.text = "New message"
-            clearPhoto()
-            transcript.removeAll()
-            transcript.revalidate()
-            smsTo.requestFocus()
-        }, 0)
+        listCol.preferredSize = Dimension(340, 200)
+        listCol.minimumSize = Dimension(280, 200)
+        listCol.border = BorderFactory.createMatteBorder(0, 0, 0, 1, t.divider)
+        val head = JPanel()
+        head.layout = BoxLayout(head, BoxLayout.Y_AXIS)
+        head.isOpaque = false
+        head.border = EmptyBorder(14, 16, 10, 16)
+        fun left(c: JComponent) = c.also { it.alignmentX = Component.LEFT_ALIGNMENT }
+        val titleRow = JPanel(BorderLayout())
+        titleRow.isOpaque = false
+        titleRow.add(JLabel("Messages").apply {
+            font = net.ithandsfree.softphone.win.ui.Type.display(net.ithandsfree.softphone.win.ui.Type.TITLE)
+            foreground = ink
+        }, BorderLayout.WEST)
+        val compose = net.ithandsfree.softphone.win.ui.IconButton(t, "compose", 40, ink, "New message (Ctrl N)") { startNewMessage() }
+        titleRow.add(compose, BorderLayout.EAST)
+        titleRow.maximumSize = Dimension(Int.MAX_VALUE, 48)
+        head.add(left(titleRow))
+        head.add(Box.createVerticalStrut(10))
+        head.add(left(messagesLineRail))
+        head.add(Box.createVerticalStrut(12))
+        threadSearch.putClientProperty(com.formdev.flatlaf.FlatClientProperties.TEXT_FIELD_LEADING_ICON,
+            net.ithandsfree.softphone.win.ui.Icons.get("search", 16, t.textMuted))
+        threadSearch.font = net.ithandsfree.softphone.win.ui.Type.ui(net.ithandsfree.softphone.win.ui.Type.LABEL + 1)
+        threadSearch.maximumSize = Dimension(Int.MAX_VALUE, 38)
+        threadSearch.preferredSize = Dimension(300, 38)
+        threadSearch.getAccessibleContext().accessibleName = "Search conversations"
+        threadSearch.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent) = filterThreads()
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent) = filterThreads()
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent) = filterThreads()
+        })
+        head.add(left(threadSearch))
         listCol.add(head, BorderLayout.NORTH)
         listCol.add(JScrollPane(threadList).apply {
             border = null
             viewport.background = ground
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
         }, BorderLayout.CENTER)
 
-        threadTitle.font = Font("Georgia", Font.PLAIN, UiScale.px(28))
-        threadTitle.foreground = ink
-        val titleRow = JPanel(BorderLayout(8, 0))
-        titleRow.background = ground
-        titleRow.border = EmptyBorder(16, 20, 8, 16)
-        titleRow.add(threadTitle, BorderLayout.CENTER)
-        titleRow.add(ghost("Call", expand = false) {
-            val number = smsTo.text.trim().ifBlank { threadTitle.text }
-            if (number.isBlank() || number == "New message") return@ghost
-            dial.text = number
-            showTab("calls")
-            placeCall()
-        }, BorderLayout.EAST)
+        convoHeader = net.ithandsfree.softphone.win.ui.ConversationHeader(t, onCall = { callThreadPeer() }, onContact = {
+            val number = smsTo.text.trim()
+            if (number.isNotBlank() && ContactBook.nameFor(number) == null) saveContact(number)
+        })
+        newMessageRow.isOpaque = false
+        newMessageRow.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 1, 0, t.divider),
+            EmptyBorder(14, 20, 14, 20),
+        )
+        newMessageRow.add(JLabel("To").apply {
+            font = net.ithandsfree.softphone.win.ui.Type.semibold(net.ithandsfree.softphone.win.ui.Type.BODY)
+            foreground = muted
+        }, BorderLayout.WEST)
+        smsTo.putClientProperty(com.formdev.flatlaf.FlatClientProperties.PLACEHOLDER_TEXT, "Name or number")
+        smsTo.font = net.ithandsfree.softphone.win.ui.Type.mono(net.ithandsfree.softphone.win.ui.Type.BODY)
+        smsTo.getAccessibleContext().accessibleName = "To"
+        newMessageRow.add(smsTo, BorderLayout.CENTER)
+        newMessageRow.isVisible = false
+        viaBar = net.ithandsfree.softphone.win.ui.ViaBar(t)
+        val top = JPanel()
+        top.layout = BoxLayout(top, BoxLayout.Y_AXIS)
+        top.isOpaque = false
+        listOf(convoHeader, newMessageRow, viaBar).forEach { left(it); top.add(it) }
+
+        transcript.border = EmptyBorder(16, 24, 16, 24)
+        val transcriptScroll = JScrollPane(transcript).apply {
+            border = null
+            viewport.background = ground
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBar.unitIncrement = 16
+        }
+        this.transcriptScroll = transcriptScroll
 
         smsBody.inputMap.put(javax.swing.KeyStroke.getKeyStroke("ENTER"), "send-text")
+        smsBody.inputMap.put(javax.swing.KeyStroke.getKeyStroke("shift ENTER"), "insert-break")
         smsBody.actionMap.put("send-text", object : javax.swing.AbstractAction() {
             override fun actionPerformed(event: java.awt.event.ActionEvent) = sendText()
         })
@@ -1308,51 +2060,106 @@ class PhoneFrame(
         val composer = JPanel()
         composer.layout = BoxLayout(composer, BoxLayout.Y_AXIS)
         composer.background = ground
-        composer.border = EmptyBorder(8, 16, 16, 16)
-        smsTo.maximumSize = Dimension(Int.MAX_VALUE, 40)
-        smsTo.alignmentX = Component.LEFT_ALIGNMENT
-        val bodyScroll = JScrollPane(smsBody)
-        bodyScroll.border = BorderFactory.createLineBorder(hairline)
-        bodyScroll.alignmentX = Component.LEFT_ALIGNMENT
-        bodyScroll.maximumSize = Dimension(Int.MAX_VALUE, 96)
-        val send = WelcomeButton("Send", gold, goldInk, expand = false).apply {
-            addActionListener { sendText() }
-            alignmentX = Component.LEFT_ALIGNMENT
-        }
-        val photo = ghost("Photo", expand = false) { choosePhoto() }
-        val removePhoto = ghost("Remove", expand = false) { clearPhoto() }
-        attachNote.alignmentX = Component.LEFT_ALIGNMENT
-        val attachRow = JPanel()
-        attachRow.background = ground
-        attachRow.alignmentX = Component.LEFT_ALIGNMENT
-        attachRow.add(photo)
-        attachRow.add(attachNote)
-        attachRow.add(removePhoto)
+        composer.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(1, 0, 0, 0, t.divider),
+            EmptyBorder(12, 20, 16, 20),
+        )
         composer.transferHandler = photoTransfer()
-        composer.add(label("To"))
-        composer.add(Box.createVerticalStrut(4))
-        composer.add(smsTo)
+        attachCard = net.ithandsfree.softphone.win.ui.AttachmentCard(t) { clearPhoto() }
+        composer.add(left(attachCard))
+        composer.add(Box.createVerticalStrut(10))
+        val fromRow = JPanel(BorderLayout())
+        fromRow.isOpaque = false
+        fromRow.maximumSize = Dimension(Int.MAX_VALUE, 26)
+        val fromLeft = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0))
+        fromLeft.isOpaque = false
+        fromLeft.add(composerFromDot)
+        composerFrom.font = net.ithandsfree.softphone.win.ui.Type.medium(net.ithandsfree.softphone.win.ui.Type.LABEL)
+        composerFrom.foreground = muted
+        fromLeft.add(composerFrom)
+        fromRow.add(fromLeft, BorderLayout.WEST)
+        fromRow.add(net.ithandsfree.softphone.win.ui.hintRow(t,
+            net.ithandsfree.softphone.win.ui.Kbd(t, "Enter"), "send ·",
+            net.ithandsfree.softphone.win.ui.Kbd(t, "Shift Enter"), "new line · drop or paste images"), BorderLayout.EAST)
+        composer.add(left(fromRow))
         composer.add(Box.createVerticalStrut(8))
-        composer.add(bodyScroll)
-        composer.add(Box.createVerticalStrut(8))
-        composer.add(attachRow)
-        composer.add(Box.createVerticalStrut(8))
-        composer.add(send)
+        val inputRow = JPanel(BorderLayout(10, 0))
+        inputRow.isOpaque = false
+        val attach = net.ithandsfree.softphone.win.ui.IconButton(t, "clip", 40, muted, "Attach a photo") { choosePhoto() }
+        attach.style("arc: 10; borderWidth: 0; background: ${net.ithandsfree.softphone.win.ui.css(t.ground)}; hoverBackground: ${net.ithandsfree.softphone.win.ui.css(t.raised)}")
+        val send = net.ithandsfree.softphone.win.ui.IconButton(t, "send", 48, t.onAction, "Send (Enter)", filled = t.action) { sendText() }
+        inputRow.add(JPanel(BorderLayout()).apply { isOpaque = false; add(attach, BorderLayout.SOUTH) }, BorderLayout.WEST)
+        inputRow.add(net.ithandsfree.softphone.win.ui.ComposerBox(t, smsBody), BorderLayout.CENTER)
+        inputRow.add(JPanel(BorderLayout()).apply { isOpaque = false; add(send, BorderLayout.SOUTH) }, BorderLayout.EAST)
+        composer.add(left(inputRow))
 
         val detail = JPanel(BorderLayout())
         detail.background = ground
-        detail.add(titleRow, BorderLayout.NORTH)
-        detail.add(JScrollPane(transcript).apply {
-            border = null
-            viewport.background = ground
-        }, BorderLayout.CENTER)
+        detail.add(top, BorderLayout.NORTH)
+        detail.add(transcriptScroll, BorderLayout.CENTER)
         detail.add(composer, BorderLayout.SOUTH)
+        showConversationFor(null)
 
         val page = JPanel(BorderLayout())
         page.background = ground
         page.add(listCol, BorderLayout.WEST)
         page.add(detail, BorderLayout.CENTER)
         return page
+    }
+
+    /** Header, via-strip and composer line for an open conversation, or the "To" row for a new message. */
+    private fun showConversationFor(peer: String?) {
+        val line = session.line
+        val label = lineLabel(line?.extension)
+        val index = lineIndex(line?.extension) ?: 0
+        val lineNumber = line?.did?.takeIf { it.isNotBlank() }?.let { displayNumber(it) }
+        composerFromDot.color = tokens.line(index)
+        composerFrom.text = "From $label" + (lineNumber?.let { " · $it" } ?: "")
+        smsBody.getAccessibleContext().accessibleDescription = "Message from $label"
+        viaBar.show(label, lineNumber, index)
+        if (peer.isNullOrBlank()) {
+            convoHeader.isVisible = false
+            newMessageRow.isVisible = true
+            viaBar.isVisible = line != null
+            return
+        }
+        val person = ContactBook.nameFor(peer)
+        val shown = displayNumber(peer)
+        convoHeader.show(
+            title = person?.name ?: shown,
+            isNumber = person == null,
+            subText = if (person != null) shown else "",
+            callTip = "Call from $label (Ctrl Enter)",
+        )
+        convoHeader.contact.isVisible = person == null
+        convoHeader.contact.toolTipText = "Add to contacts"
+        convoHeader.isVisible = true
+        newMessageRow.isVisible = false
+        viaBar.isVisible = true
+    }
+
+    private fun callThreadPeer() {
+        val number = smsTo.text.trim()
+        if (number.isBlank()) return
+        dial.text = number
+        showTab("calls")
+        placeCall()
+    }
+
+    /** Applies the thread search box to the loaded threads. */
+    private fun filterThreads() {
+        val query = threadSearch.text.trim()
+        val keep = threadList.selectedValue?.peer
+        suppressThreadOpen = true
+        threadModel.clear()
+        allThreads.filter { row ->
+            query.isBlank() || row.peer.contains(query.filter { it.isDigit() }.ifBlank { "\u0000" }) ||
+                threadView(row).title.contains(query, ignoreCase = true) ||
+                row.snippet.orEmpty().contains(query, ignoreCase = true)
+        }.forEach { threadModel.addElement(it) }
+        val index = (0 until threadModel.size()).firstOrNull { threadModel[it].peer == keep } ?: -1
+        if (index >= 0) threadList.selectedIndex = index
+        suppressThreadOpen = false
     }
 
     private fun thread(): JPanel {
@@ -1371,157 +2178,462 @@ class PhoneFrame(
     }
 
     private fun lines(): JPanel {
-        val page = column(ground)
-        page.border = EmptyBorder(28, 28, 16, 28)
-        page.add(pin(JLabel("Lines").apply { font = serif; foreground = ink }))
-        page.add(Box.createVerticalStrut(16))
-        lineList.layout = BoxLayout(lineList, BoxLayout.Y_AXIS)
-        lineList.background = ground
-        lineList.alignmentX = Component.LEFT_ALIGNMENT
-        page.add(lineList)
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Add a line", expand = false) {
-            if (session.lines().size >= 2) {
-                note("This phone already has two lines.")
-                return@ghost
+        linesPage = net.ithandsfree.softphone.win.ui.LinesPage(tokens, object : net.ithandsfree.softphone.win.ui.LinesPage.Actions {
+            override fun select(extension: String) {
+                linesSelected = extension
+                refreshLinesPage()
             }
-            showRoot("welcome")
-        }))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(wrappingCopy("Add a second extension with the setup link from email. Each line can place calls, send messages, and keep its own call history. One extension can also ring on the phone.")))
-        page.putClientProperty("lines", lineList)
-        return page
+            override fun makeDefault(extension: String) = pickLine(extension)
+            override fun setDnd(extension: String, on: Boolean) {
+                val line = session.lines().firstOrNull { it.extension == extension } ?: return
+                lineDnd[extension] = on
+                refreshLinesPage()
+                work("Do not disturb") {
+                    session.setPbxDnd(line, on)
+                    note(if (on) "${lineLabel(extension)} is on Do not disturb" else "${lineLabel(extension)} is available")
+                    loadLineFacts(extension)
+                }
+            }
+            override fun rename(extension: String, label: String) {
+                session.rename(extension, label)
+                note("Line $extension is now ${lineLabel(extension)}")
+                paintedLines = ""
+                convoLineKey = ""
+                reloadRecents()
+                paintLineControls(SipBridge.snapshot())
+                refreshLinesPage()
+            }
+            override fun ringtone(extension: String, id: String?) {
+                AudioPrefs.saveLineRingtone(extension, id)
+                refreshLinesPage()
+            }
+            override fun playRingtone(extension: String) {
+                val snap = SipBridge.snapshot()
+                if (snap.callActive || snap.incoming) return
+                CallRinger.stop()
+                CallRinger.lineExtension = extension
+                CallRinger.start()
+                Timer(2400) { CallRinger.stop() }.apply { isRepeats = false; start() }
+            }
+            override fun signIn(extension: String) = openSignIn(extension)
+            override fun signOut(extension: String) {
+                session.signOut(extension)
+                note("Signed out of ${lineLabel(extension)}. Calls keep working")
+                refreshLinesPage()
+            }
+            override fun setUpAgain(extension: String) {
+                note("Open the setup email for ${lineLabel(extension)}, or sign in")
+                showRoot("welcome")
+            }
+            override fun remove(extension: String) {
+                val label = lineLabel(extension)
+                work("Remove line") {
+                    session.removeLine(extension, "${profile.userAgentName}/0.1.0 PJSUA")
+                    lineDnd.remove(extension)
+                    lineCaps.remove(extension)
+                    SwingUtilities.invokeLater {
+                        linesSelected = session.line?.extension
+                        paintedLines = ""
+                        convoLineKey = ""
+                        titleKey = ""
+                        reloadRecents()
+                        refreshThreads()
+                        if (session.lines().isEmpty()) showRoot("welcome") else refreshLine()
+                        refreshLinesPage()
+                    }
+                    note("$label removed from this PC")
+                }
+            }
+            override fun addLine() {
+                if (session.lines().size >= 2) return note("This PC already has two lines.")
+                showRoot("welcome")
+            }
+        })
+        return linesPage
     }
 
+    /** Fetches DND and the admin's capabilities for each line (or one), then repaints the Lines page. */
+    private fun loadLineFacts(only: String? = null) {
+        session.lines().filter { only == null || it.extension == only }.forEach { line ->
+            work("Lines") {
+                val info = runCatching { session.lineInfo(line) }.getOrNull()
+                val dnd = runCatching { session.pbxDnd(line) }.getOrNull()
+                SwingUtilities.invokeLater {
+                    info?.capabilities?.let { lineCaps[line.extension] = it }
+                    if (dnd != null) lineDnd[line.extension] = dnd
+                    refreshLinesPage()
+                }
+            }
+        }
+    }
+
+    private fun refreshLinesPage() {
+        if (!::linesPage.isInitialized) return
+        val snap = SipBridge.snapshot()
+        val lines = session.lines()
+        if (linesSelected == null || lines.none { it.extension == linesSelected }) linesSelected = session.line?.extension
+        val host = lines.firstOrNull()?.sipDomain.orEmpty()
+        linesPage.show(
+            net.ithandsfree.softphone.win.ui.LinesPage.Model(
+                lines = lines.mapIndexed { index, line ->
+                    val up = if (index == 0) snap.registered else snap.secondRegistered
+                    val caps = lineCaps[line.extension]
+                    net.ithandsfree.softphone.win.ui.LinesPage.Line(
+                        extension = line.extension,
+                        label = lineLabel(line.extension),
+                        number = line.did.takeIf { it.isNotBlank() }?.let { displayNumber(it) },
+                        colorIndex = index,
+                        isDefault = line.extension == session.line?.extension,
+                        dnd = lineDnd[line.extension],
+                        caps = caps?.let { net.ithandsfree.softphone.win.ui.LinesPage.Caps(it.voice, it.sms, it.mms) },
+                        missed = missedSince(line.extension),
+                        unread = if (line.extension == session.line?.extension) knownUnread.coerceAtLeast(0) else 0,
+                        registered = up,
+                        registration = when {
+                            up -> "$host · ${snap.transport?.name ?: "TLS"}"
+                            askedRegister -> "Registering with $host"
+                            else -> "Not registered"
+                        },
+                        signedInAs = line.umUsername.takeIf { line.signedIn },
+                        ringtoneId = AudioPrefs.lineRingtone(line.extension),
+                    )
+                },
+                selected = linesSelected,
+                maxLines = 2,
+                ringtones = listOf("" to "Same as default (${RingtoneLibrary.choice(AudioPrefs.ringtoneStyle()).label})") +
+                    RingtoneLibrary.builtIn.map { it.id to it.label },
+            ),
+        )
+    }
+
+    /** Round-3 Settings: lines + sections on the left, the chosen section on the right. */
     private fun settings(): JPanel {
-        val page = column(ground)
-        page.border = EmptyBorder(28, 28, 16, 28)
-        page.add(pin(JLabel("Settings").apply { font = serif; foreground = ink }))
-        page.add(Box.createVerticalStrut(16))
-        page.add(pin(label(profile.productName)))
-        page.add(pin(label("Build $APP_BUILD")))
-        page.add(pin(label(profile.brandSub)))
-        page.add(Box.createVerticalStrut(12))
-        val pinBox = javax.swing.JCheckBox("Pin this window on top")
-        styleCheck(pinBox)
-        pinBox.isSelected = WindowPrefs.pinned()
-        pinBox.addActionListener {
-            WindowPrefs.savePin(pinBox.isSelected)
-            isAlwaysOnTop = pinBox.isSelected
-            surfaces.setToggles(pinBox.isSelected, WindowPrefs.dnd())
+        val t = tokens
+        val ui = net.ithandsfree.softphone.win.ui.Type
+        settingsShell = net.ithandsfree.softphone.win.ui.SettingsShell(t) { id ->
+            settingsSection = id
+            if (id == "audio") loadAudioDevices()
         }
-        page.add(pin(pinBox))
-        val dndBox = javax.swing.JCheckBox("Do not disturb")
-        styleCheck(dndBox)
-        dndBox.isSelected = WindowPrefs.dnd()
-        dndBox.addActionListener {
-            WindowPrefs.saveDnd(dndBox.isSelected)
-            if (dndBox.isSelected) CallRinger.stop()
-            surfaces.setToggles(WindowPrefs.pinned(), dndBox.isSelected)
-            work("Do not disturb") { session.setPbxDnd(dndBox.isSelected) }
+        fun stack(vararg parts: JComponent): JComponent {
+            val p = JPanel()
+            p.layout = BoxLayout(p, BoxLayout.Y_AXIS)
+            p.isOpaque = false
+            parts.forEach { it.alignmentX = Component.LEFT_ALIGNMENT; p.add(it) }
+            return p
         }
-        page.add(pin(dndBox))
-        page.add(pin(wrappingCopy("Do not disturb keeps the incoming window quiet here, and sets the same state on the PBX.")))
-        this.pinBox = pinBox
-        this.dndBox = dndBox
-        page.add(Box.createVerticalStrut(12))
-        page.add(pin(wrappingCopy("Voice uses SIP TLS on 5061, then TCP on 5060. UDP signalling is not used.")))
-        page.add(Box.createVerticalStrut(12))
-        page.add(pin(label("Microphone")))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(audioCombo(micModel) {
-            val picked = micModel.selectedItem as? SipBridge.AudioDevice ?: return@audioCombo
-            AudioPrefs.saveCapture(picked.name)
-            work("Microphone") { if (SipBridge.setCapture(picked.index) != 0) note("Microphone was not changed") }
-        }))
-        page.add(Box.createVerticalStrut(10))
-        page.add(pin(label("Microphone level")))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(micMeter))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(wrappingCopy("Speak, and the gold bar moves. It stays quiet when this PC hears nothing.")))
-        page.add(Box.createVerticalStrut(10))
-        page.add(pin(label("Speaker")))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(audioCombo(speakerModel) { useSelectedSpeaker() }))
-        page.add(Box.createVerticalStrut(10))
-        page.add(pin(label("Ringer")))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(ringerCombo()))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(wrappingCopy("The ringtone plays on this speaker, including a USB headset.")))
-        page.add(Box.createVerticalStrut(6))
-        val alsoRing = javax.swing.JCheckBox("Also ring on the headset")
-        alsoRing.background = ground
-        alsoRing.foreground = ink
-        alsoRing.font = uiFont
-        alsoRing.isOpaque = true
-        alsoRing.isSelected = AudioPrefs.alsoRing()
-        alsoRing.alignmentX = Component.LEFT_ALIGNMENT
-        alsoRing.addActionListener { AudioPrefs.saveAlsoRing(alsoRing.isSelected) }
-        page.add(pin(alsoRing))
-        page.add(Box.createVerticalStrut(10))
-        page.add(pin(label("Ringtone")))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(ringtoneCombo()))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Choose your own", expand = false) { chooseRingtone() }))
-        page.add(Box.createVerticalStrut(8))
-        removeRingtone = ghost("Remove your file", expand = false) {
+        fun gap(h: Int) = Box.createVerticalStrut(h) as JComponent
+        fun caption(text: String) = JLabel("<html>$text</html>").apply {
+            font = ui.ui(ui.CAPTION + 0.5f)
+            foreground = t.textCaption
+            maximumSize = Dimension(720, 60)
+        }
+        fun combo(c: JComponent) = c.apply {
+            putClientProperty(com.formdev.flatlaf.FlatClientProperties.STYLE, "arc: 12; padding: 6,10,6,10")
+            preferredSize = Dimension(360, 42)
+            (this as? javax.swing.JComboBox<*>)?.renderer = deviceRenderer()
+        }
+
+        // Audio & devices
+        val playTest = net.ithandsfree.softphone.win.ui.PillButton(t, "Play test sound", height = 42) {
+            val snap = SipBridge.snapshot()
+            if (snap.callActive || snap.incoming) return@PillButton
+            CallRinger.stop()
+            CallRinger.lineExtension = null
+            CallRinger.start()
+            Timer(2400) { CallRinger.stop() }.apply { isRepeats = false; start() }
+        }
+        val (alsoRingRow, _) = net.ithandsfree.softphone.win.ui.switchRow(
+            t, "Also ring on the headset, so you hear calls whether it's on or not", AudioPrefs.alsoRing(),
+        ) { AudioPrefs.saveAlsoRing(it) }
+        val (voiceRow, _) = net.ithandsfree.softphone.win.ui.switchRow(
+            t, "Echo cancellation, noise suppression and automatic level", AudioPrefs.voiceProcessing(),
+            "These run together in this build. Turn off only if a headset already does its own echo cancelling.",
+        ) { on ->
+            AudioPrefs.saveVoiceProcessing(on)
+            work("Voice processing") { SipBridge.setEchoCancel(on) }
+        }
+        val (keypadRow, _) = net.ithandsfree.softphone.win.ui.switchRow(t, "Keypad sound", AudioPrefs.keypadTone()) {
+            AudioPrefs.saveKeypadTone(it)
+        }
+        removeRingtone = net.ithandsfree.softphone.win.ui.PillButton(t, "Remove your file", height = 38) {
             AudioPrefs.clearRingtone()
             reloadRingtoneList()
             note("Using Two tone")
         }
-        page.add(pin(removeRingtone))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(wrappingCopy("Pick a tone, or add your own WAV, AIFF, or AU file. It loops until the call is answered.")))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(audioNote))
-        page.add(Box.createVerticalStrut(12))
-        page.add(pin(WelcomeButton("Call echo test", gold, goldInk, expand = false).apply {
-            addActionListener {
+        val chooseOwn = net.ithandsfree.softphone.win.ui.PillButton(t, "Choose your own", height = 38) { chooseRingtone() }
+        val echoCard = net.ithandsfree.softphone.win.ui.Card(t, 16)
+        echoCard.layout = BorderLayout(14, 0)
+        echoCard.border = EmptyBorder(16, 18, 16, 16)
+        echoCard.add(JLabel(net.ithandsfree.softphone.win.ui.Icons.get("phone", 22, t.actionText)), BorderLayout.WEST)
+        echoCard.add(stack(
+            JLabel("Test a call").apply { font = ui.semibold(ui.BODY); foreground = t.text },
+            gap(3),
+            echoCaption.apply { font = ui.ui(ui.CAPTION + 0.5f); foreground = t.textMuted },
+        ), BorderLayout.CENTER)
+        echoCard.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(net.ithandsfree.softphone.win.ui.PillButton(t, "Call echo test  *43", primary = true, height = 42) {
                 dial.text = "*43"
                 showTab("calls")
                 placeCall()
+            }, BorderLayout.CENTER)
+        }, BorderLayout.EAST)
+        echoCard.maximumSize = Dimension(720, 80)
+        val audio = stack(
+            net.ithandsfree.softphone.win.ui.settingRow(t, "Microphone", combo(audioCombo(micModel) {
+                val picked = micModel.selectedItem as? SipBridge.AudioDevice ?: return@audioCombo
+                AudioPrefs.saveCapture(picked.name)
+                work("Microphone") { if (SipBridge.setCapture(picked.index) != 0) note("Microphone was not changed") }
+            }), settingsMeter),
+            net.ithandsfree.softphone.win.ui.settingRow(t, "Speaker", combo(audioCombo(speakerModel) { useSelectedSpeaker() }), playTest),
+            net.ithandsfree.softphone.win.ui.settingRow(t, "Ringer", combo(ringerCombo())),
+            net.ithandsfree.softphone.win.ui.settingRow(t, "Call volume", combo(javax.swing.JComboBox(
+                CALL_VOLUMES.map { (percent, label) -> if (percent == 100) label else "$label ($percent%)" }.toTypedArray(),
+            ).apply {
+                selectedIndex = CALL_VOLUMES.indexOfFirst { it.first == AudioPrefs.callVolume() }.coerceAtLeast(0)
+                toolTipText = "Makes the other person louder on every call. Also in the device menu during a call."
+                addActionListener { CALL_VOLUMES.getOrNull(selectedIndex)?.let { (p, _) -> if (p != AudioPrefs.callVolume()) setCallVolume(p) } }
+                callVolumeCombo = this
+            })),
+            alsoRingRow,
+            gap(14), net.ithandsfree.softphone.win.ui.divider(t), gap(16),
+            net.ithandsfree.softphone.win.ui.sectionLabel(t, "Voice processing"),
+            voiceRow,
+            keypadRow,
+            gap(14), net.ithandsfree.softphone.win.ui.divider(t), gap(16),
+            net.ithandsfree.softphone.win.ui.sectionLabel(t, "Ringtone"),
+            net.ithandsfree.softphone.win.ui.settingRow(t, "Default ringtone", combo(ringtoneCombo()), chooseOwn, removeRingtone),
+            caption("Each line can have its own ringtone on the Lines page. Your own file: WAV, AIFF or AU, up to 8 MB."),
+            gap(20),
+            echoCard,
+            gap(10),
+            audioNote.apply { font = ui.ui(ui.CAPTION + 0.5f); foreground = t.textCaption },
+        )
+
+        // Notifications
+        val (dndRow, dndSwitch) = net.ithandsfree.softphone.win.ui.switchRow(
+            t, "Do not disturb on this PC", WindowPrefs.dnd(),
+            "Silences the ring and the incoming window here, and sets Do not disturb on the PBX for the default " +
+                "line. Each line's PBX setting is on the Lines page.",
+        ) { on ->
+            WindowPrefs.saveDnd(on)
+            if (on) CallRinger.stop()
+            surfaces.setToggles(WindowPrefs.pinned(), on)
+            work("Do not disturb") { session.setPbxDnd(on) }
+        }
+        dndToggle = dndSwitch
+        val (waitingRow, _) = net.ithandsfree.softphone.win.ui.switchRow(
+            t, "Call waiting", WindowPrefs.callWaiting(),
+            "A second call rings beside the one you are on (a short beep in your headset), with Hold &amp; answer. " +
+                "Off: the second caller hears busy and the PBX tries your other devices, then voicemail.",
+        ) { on ->
+            WindowPrefs.saveCallWaiting(on)
+            SipBridge.setCallWaiting(on)
+            DiagLog.app("call waiting ${if (on) "on" else "off"}")
+        }
+        val notifications = stack(dndRow, gap(10), waitingRow)
+
+        // Keyboard shortcuts
+        val keys = shortcutSection { caption(it) }
+
+        // Calling links & startup
+        val links = stack(
+            caption("Setup links (<b>ihfphone:</b>) always open ${profile.productName}. <b>tel:</b> and <b>sip:</b> links " +
+                "open it when no other app owns them. Windows asks before another app is replaced."),
+            gap(10),
+            caption("Closing the window keeps ${profile.productName} in the tray so calls still ring. Quit from the tray stops ringing on this computer."),
+        )
+
+        // Appearance
+        val (pinRow, pinSwitch) = net.ithandsfree.softphone.win.ui.switchRow(t, "Keep this window on top", WindowPrefs.pinned()) { on ->
+            setPinned(on)
+        }
+        pinToggle = pinSwitch
+        val appearance = stack(pinRow, gap(8), caption("${profile.productName} uses the dark theme on the desktop."))
+
+        // Advanced
+        val advanced = stack(
+            net.ithandsfree.softphone.win.ui.sectionLabel(t, "Contacts"),
+            caption("Import a CSV or vCard, or sign in to a Google or Microsoft 365 mailbox in the browser. The mail app on this PC is not used."),
+            gap(10),
+            JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Import contacts", "user-plus", height = 40) { importContacts() })
+                add(Box.createHorizontalStrut(10))
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Connect Microsoft 365", height = 40) { connectMailbox(MailboxAuth.Provider.MICROSOFT) })
+                add(Box.createHorizontalStrut(10))
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Connect Google", height = 40) { connectMailbox(MailboxAuth.Provider.GOOGLE) })
+                maximumSize = Dimension(720, 44)
+            },
+            gap(22),
+            net.ithandsfree.softphone.win.ui.sectionLabel(t, "Diagnostics"),
+            caption("A log of calls, registration and transfers is kept on this PC for 14 days (no passwords, no call " +
+                "audio). If something goes wrong on a call, save it and send it to your administrator."),
+            gap(10),
+            JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Save diagnostic log…", "download", height = 40) { exportDiagnostics() })
+                add(Box.createHorizontalStrut(10))
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Open log folder", height = 40) {
+                    runCatching { DiagLog.dir().mkdirs(); java.awt.Desktop.getDesktop().open(DiagLog.dir()) }
+                })
+                maximumSize = Dimension(720, 44)
+            },
+            gap(22),
+            net.ithandsfree.softphone.win.ui.sectionLabel(t, "Connection"),
+            caption("Voice uses SIP over TLS on 5061, then TCP on 5060. UDP signalling is not used. Texts go through the PBX softphone service over HTTPS."),
+            gap(22),
+            net.ithandsfree.softphone.win.ui.sectionLabel(t, "About"),
+            caption("${profile.productName} · build $APP_BUILD · ${profile.brandSub} · GPL-2.0"),
+            gap(10),
+            JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Privacy", height = 38) { browse("https://ithandsfree.com/privacy#ihf-phone") })
+                add(Box.createHorizontalStrut(10))
+                add(net.ithandsfree.softphone.win.ui.PillButton(t, "Licences", height = 38) { browse("https://github.com/ithandsfree/softphone") })
+                maximumSize = Dimension(720, 42)
+            },
+        )
+
+        settingsShell.sections(
+            listOf(
+                net.ithandsfree.softphone.win.ui.SettingsShell.Section("audio", "Audio & devices", "headset", audio),
+                net.ithandsfree.softphone.win.ui.SettingsShell.Section("notifications", "Notifications", "bell", notifications),
+                net.ithandsfree.softphone.win.ui.SettingsShell.Section("shortcuts", "Keyboard shortcuts", "keyboard", keys),
+                net.ithandsfree.softphone.win.ui.SettingsShell.Section("links", "Calling links & startup", "link", links),
+                net.ithandsfree.softphone.win.ui.SettingsShell.Section("appearance", "Appearance", "monitor", appearance),
+                net.ithandsfree.softphone.win.ui.SettingsShell.Section("advanced", "Advanced", "shield", advanced),
+            ),
+        )
+        return settingsShell
+    }
+
+    /** Shows "Windows default" for the WinMM "Wave mapper" device in the pickers. */
+    private fun deviceRenderer(): javax.swing.ListCellRenderer<Any?> {
+        val base = javax.swing.DefaultListCellRenderer()
+        return javax.swing.ListCellRenderer { list, value, index, selected, focus ->
+            val text = when (value) {
+                is SipBridge.AudioDevice -> value.name
+                else -> value?.toString().orEmpty()
             }
-        }))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Play ringtone", expand = false) {
-            if (SipBridge.snapshot().incoming) return@ghost
-            CallRinger.start()
-            Timer(2400) { CallRinger.stop() }.apply { isRepeats = false; start() }
-        }))
-        page.add(Box.createVerticalStrut(16))
-        page.add(pin(label("Contacts")))
-        page.add(Box.createVerticalStrut(4))
-        page.add(pin(wrappingCopy("Import a CSV or vCard, or sign in to a Google or Microsoft 365 mailbox in the browser. The mail app on this PC is not used.")))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Import contacts", expand = false) { importContacts() }))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Connect Microsoft 365", expand = false) { connectMailbox(MailboxAuth.Provider.MICROSOFT) }))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Connect Google", expand = false) { connectMailbox(MailboxAuth.Provider.GOOGLE) }))
-        page.add(Box.createVerticalStrut(16))
-        page.add(pin(ghost("Keyboard shortcuts", expand = false) { showShortcuts() }))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(wrappingCopy("Press ? for the shortcut list. During a call, M mutes, H holds, T transfers, and K opens the keypad.")))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(label("Licence GPL-2.0.")))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Privacy", expand = false) {
-            browse("https://ithandsfree.com/privacy#ihf-phone")
-        }))
-        page.add(Box.createVerticalStrut(8))
-        page.add(pin(ghost("Licences", expand = false) {
-            browse("https://github.com/ithandsfree/softphone")
-        }))
-        page.add(Box.createVerticalStrut(8))
-        val tones = javax.swing.JCheckBox("Keypad sound")
-        styleCheck(tones)
-        tones.isSelected = AudioPrefs.keypadTone()
-        tones.addActionListener { AudioPrefs.saveKeypadTone(tones.isSelected) }
-        page.add(pin(tones))
-        return page
+            val shown = if (text.contains("wave mapper", ignoreCase = true)) "Windows default" else text
+            base.getListCellRendererComponent(list, shown, index, selected, focus)
+        }
+    }
+
+
+    /**
+     * Settings › Keyboard shortcuts: every remappable key with Change and Reset, grouped as on the sheet, then the
+     * opt-in system-wide keys. A change is checked against Windows and text-box keys and against other actions.
+     */
+    private fun shortcutSection(caption: (String) -> JComponent): JComponent {
+        val t = tokens
+        val box = JPanel()
+        box.layout = BoxLayout(box, BoxLayout.Y_AXIS)
+        box.isOpaque = false
+        fun add(c: JComponent) { c.alignmentX = Component.LEFT_ALIGNMENT; box.add(c) }
+        shortcutEditRows.clear()
+        ShortcutGroup.entries.forEach { group ->
+            if (group != ShortcutGroup.ANYWHERE) {
+                add(Box.createVerticalStrut(12) as JComponent)
+                add(net.ithandsfree.softphone.win.ui.divider(t))
+                add(Box.createVerticalStrut(14) as JComponent)
+            }
+            add(net.ithandsfree.softphone.win.ui.sectionLabel(t, group.title))
+            if (group == ShortcutGroup.SYSTEM) {
+                val (row, _) = net.ithandsfree.softphone.win.ui.switchRow(
+                    t, "Use system-wide keys", KeymapStore.current().globalEnabled,
+                    "Answer, hang up and mute while another app is in front. They take these keys from every other app, " +
+                        "so they are off until you turn them on.",
+                ) { on ->
+                    KeymapStore.save(KeymapStore.current().withGlobal(on))
+                    applyGlobalHotkeys()
+                    if (on) note("System-wide keys are on")
+                }
+                add(row)
+            }
+            Shortcut.entries.filter { it.group == group }.forEach { action ->
+                val row = net.ithandsfree.softphone.win.ui.ShortcutEditRow(t, action.label, onCapture = { captureShortcut(action, it) }) {
+                    KeymapStore.save(KeymapStore.current().reset(action))
+                    shortcutChanged(action)
+                }
+                shortcutEditRows[action] = row
+                add(row)
+            }
+            FIXED_SHORTCUTS.filter { it.first == group }.forEach { (_, label, keys) ->
+                add(net.ithandsfree.softphone.win.ui.keyRow(t, label, listOf(keys)).apply { maximumSize = Dimension(720, 40) })
+            }
+        }
+        add(Box.createVerticalStrut(16) as JComponent)
+        add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
+            isOpaque = false
+            add(net.ithandsfree.softphone.win.ui.PillButton(t, "Show the shortcuts sheet", "keyboard", height = 38) { showShortcuts() })
+            add(Box.createHorizontalStrut(10))
+            add(net.ithandsfree.softphone.win.ui.PillButton(t, "Reset all", height = 38) {
+                KeymapStore.save(KeymapStore.current().resetAll())
+                Shortcut.entries.forEach { shortcutChanged(it) }
+                note("Shortcuts are back to the defaults")
+            })
+            maximumSize = Dimension(720, 42)
+        })
+        add(Box.createVerticalStrut(12) as JComponent)
+        add(caption(
+            "Keys without Ctrl or Alt work only during a call and only when the cursor is not in a text box. " +
+                "Recents also use Enter, M, Del, Ctrl Shift C and Shift F10; these are fixed.",
+        ))
+        Shortcut.entries.forEach { paintShortcutRow(it) }
+        return box
+    }
+
+    private fun paintShortcutRow(action: Shortcut) {
+        val keymap = KeymapStore.current()
+        shortcutEditRows[action]?.display(keymap.chord(action).label(), !keymap.isDefault(action))
+    }
+
+    private fun shortcutChanged(action: Shortcut) {
+        if (action == Shortcut.SEARCH) titleBar.searchKey(KeymapStore.current().chord(action).label())
+        paintShortcutRow(action)
+        if (action.global) applyGlobalHotkeys()
+    }
+
+    /** Change was pressed: the next key press (with its modifiers) becomes the new key, unless it is refused. */
+    private fun captureShortcut(action: Shortcut, row: net.ithandsfree.softphone.win.ui.ShortcutEditRow) {
+        if (capturingRow === row) {
+            endCapture()
+            paintShortcutRow(action)
+            return
+        }
+        endCapture()
+        capturingRow = row
+        row.prompt()
+        // System-wide keys are suspended while capturing, so pressing the current one does not hang up a call.
+        if (action.global) GlobalHotkeys.stop()
+        net.ithandsfree.softphone.win.ui.KeyCapture.listener = listener@{ event ->
+            if (Chord.isModifierOnly(event.keyCode)) return@listener true
+            val chord = Chord.of(event)
+            if (chord == Chord(java.awt.event.KeyEvent.VK_ESCAPE)) {
+                endCapture()
+                paintShortcutRow(action)
+                if (action.global) applyGlobalHotkeys()
+                return@listener true
+            }
+            val keymap = KeymapStore.current()
+            val refusal = keymap.refusal(action, chord)
+            if (refusal != null) {
+                row.problem(refusal)
+                return@listener true
+            }
+            endCapture()
+            KeymapStore.save(keymap.with(action, chord))
+            shortcutChanged(action)
+            row.note("${action.label} is now ${chord.label()}")
+            true
+        }
+    }
+
+    private fun endCapture() {
+        net.ithandsfree.softphone.win.ui.KeyCapture.listener = null
+        capturingRow = null
     }
 
     private fun styleCheck(box: javax.swing.JCheckBox) {
@@ -1532,32 +2644,35 @@ class PhoneFrame(
         box.alignmentX = Component.LEFT_ALIGNMENT
     }
 
+    private fun navItems() = listOf(
+        Triple("calls", "Calls", "phone"),
+        Triple("messages", "Messages", "msg"),
+        Triple("lines", "Lines", "lines"),
+        Triple("settings", "Settings", "settings"),
+    )
+
+    /** The rail and the compact bottom bar both land here. */
+    private fun pickTab(id: String) {
+        if (id == "messages") refreshThreads()
+        if (id == "lines") refreshLine()
+        if (id == "settings") loadAudioDevices()
+        showTab(id)
+    }
+
     private fun nav(): JPanel {
-        val bar = JPanel()
-        bar.layout = BoxLayout(bar, BoxLayout.Y_AXIS)
-        bar.background = ground
-        bar.border = EmptyBorder(8, 6, 12, 6)
-        bar.preferredSize = Dimension(UiScale.px(84), 200)
-        listOf("Calls" to "calls", "Messages" to "messages", "Lines" to "lines", "Settings" to "settings")
-            .forEach { (title, id) ->
-                val button = RailButton(title, id, gold, muted, raised, ground, ink)
-                button.alignmentX = Component.CENTER_ALIGNMENT
-                button.maximumSize = Dimension(UiScale.px(76), UiScale.px(68))
-                button.addActionListener {
-                    if (id == "messages") refreshThreads()
-                    if (id == "lines") refreshLine()
-                    if (id == "settings") loadAudioDevices()
-                    showTab(id)
-                }
-                tabs[id] = button
-                bar.add(button)
-                bar.add(Box.createVerticalStrut(4))
-            }
-        return bar
+        navRail = net.ithandsfree.softphone.win.ui.NavRail(
+            tokens,
+            navItems(),
+            onPick = { id -> pickTab(id) },
+            onShortcuts = { showShortcuts() },
+            onAccount = { showTab("lines") },
+        )
+        return navRail
     }
 
     private fun refreshCall() {
         val snap = SipBridge.snapshot()
+        watchTransfer(snap)
         val transport = snap.transport?.name ?: ""
         voice.text = when {
             SipBridge.loadError != null -> "Voice library not built yet"
@@ -1588,6 +2703,24 @@ class PhoneFrame(
         }
         paintLineControls(snap)
         val connected = snap.callActive && snap.callState.equals("CONFIRMED", ignoreCase = true)
+        // Every call is followed by its id (call waiting can put two up): own timer, own Recents row when it ends.
+        val trackedCalls = buildList {
+            if ((snap.callActive || snap.incoming) && snap.callId >= 0) {
+                add(CallTracker.Seen(
+                    snap.callId,
+                    displayParty(snap.remote, dial.text.filter { it.isDigit() || it == '*' || it == '#' || it == '+' }),
+                    snap.callExtension.ifBlank { ext },
+                    ringing = snap.incoming,
+                    connected = connected,
+                ))
+            }
+            if (snap.waitingState > 0 && snap.waitingId >= 0) {
+                add(CallTracker.Seen(snap.waitingId, displayParty(snap.waitingRemote, ""), snap.waitingExtension, snap.waitingState == 1, snap.waitingState == 2))
+            }
+        }
+        val finishedCalls = callTracker.update(trackedCalls, System.currentTimeMillis())
+        callStartedAt = callTracker.connectedAt(snap.callId) ?: 0L
+        watchCallWaiting(snap)
         var finishedSeconds = 0
         if (connected) {
             if (callStartedAt == 0L) callStartedAt = System.currentTimeMillis()
@@ -1634,6 +2767,15 @@ class PhoneFrame(
             else -> "No line"
         }
         headerStatus.foreground = if (onCall || WindowPrefs.dnd()) gold else emerald
+        paintTitleStatus(
+            snap,
+            when {
+                connected -> liveTimer.text
+                ringing -> "Incoming"
+                live -> "Calling"
+                else -> null
+            },
+        )
         title = when {
             ringing -> "${profile.productName} — Incoming"
             connected -> "${profile.productName} — On call ${liveTimer.text}"
@@ -1652,24 +2794,74 @@ class PhoneFrame(
         keypadButton.isVisible = live
         if (!live) showDtmf = false
         dtmfPad.isVisible = live && showDtmf
+        dtmfHolder?.isVisible = live && showDtmf
         callButton.isVisible = !ringing && !live
+        if (onCall && ::inCallPane.isInitialized) {
+            val callExt = snap.callExtension.ifBlank { lastCallExt.ifBlank { ext } }
+            val callLine = session.lines().firstOrNull { it.extension == callExt }
+            val person = ContactBook.nameFor(party)
+            val shownParty = person?.name ?: displayNumber(party).ifBlank { "Call" }
+            val colorIndex = lineIndex(callExt) ?: 0
+            inCallPane.show(
+                net.ithandsfree.softphone.win.ui.InCallPane.State(
+                    mode = when {
+                        ringing -> net.ithandsfree.softphone.win.ui.InCallPane.Mode.RINGING
+                        connected -> net.ithandsfree.softphone.win.ui.InCallPane.Mode.LIVE
+                        else -> net.ithandsfree.softphone.win.ui.InCallPane.Mode.CALLING
+                    },
+                    lineLabel = lineLabel(callExt),
+                    lineNumber = callLine?.did?.takeIf { it.isNotBlank() }?.let { displayNumber(it) },
+                    lineColorIndex = colorIndex,
+                    title = shownParty,
+                    titleIsNumber = person == null,
+                    subtitle = if (person != null) displayNumber(party) else "",
+                    timer = liveTimer.text,
+                    muted = snap.muted,
+                    held = snap.held,
+                    keypadOpen = showDtmf,
+                    device = (speakerModel.selectedItem as? SipBridge.AudioDevice)?.name,
+                ),
+            )
+            activeCard.show(
+                shownParty,
+                lineLabel(callExt),
+                colorIndex,
+                when {
+                    ringing -> "ringing"
+                    snap.held -> "on hold"
+                    connected -> "on call"
+                    else -> "calling"
+                },
+                liveTimer.text,
+            )
+        }
+        // The pinned card shows only while the call pane is not in front (browsing recents or another tab).
+        activeCard.isVisible = onCall && (browsingDuringCall || currentTab != "calls")
         if (onCall && party.isNotBlank()) lastParty = party
         if ((snap.callActive || snap.incoming) && snap.callExtension.isNotBlank()) lastCallExt = snap.callExtension
         if (lastCallExt.isBlank() && (snap.callActive || snap.incoming)) lastCallExt = ext
-        if (ringing) lastIncoming = true
+        if (ringing) {
+            lastIncoming = true
+            CallRinger.lineExtension = snap.callExtension.ifBlank { null }
+            if (recordingPlayer.playing != null) {
+                recordingPlayer.stop()
+                if (::callDetailPane.isInitialized) callDetailPane.playing(null)
+            }
+        }
         if (connected) lastConnected = true
         val mode = when {
             ringing -> "in"
             live -> "live"
             else -> "idle"
         }
-        if ((callMode == "in" || callMode == "live") && mode == "idle") {
-            val kind = when {
-                lastIncoming && !lastConnected -> "Missed"
-                lastIncoming -> "Incoming"
-                else -> "Outgoing"
+        if (finishedCalls.isNotEmpty()) {
+            finishedCalls.forEach { done ->
+                CallLog.append(CallEntry(System.currentTimeMillis(), done.kind, done.party, done.seconds, done.extension))
+                DiagLog.app("call logged: ${done.kind} ${done.seconds}s on ${done.extension}")
             }
-            CallLog.append(CallEntry(System.currentTimeMillis(), kind, lastParty, finishedSeconds, lastCallExt))
+            reloadRecents()
+        }
+        if ((callMode == "in" || callMode == "live") && mode == "idle") {
             lastParty = ""
             lastCallExt = ""
             lastIncoming = false
@@ -1723,20 +2915,39 @@ class PhoneFrame(
         val mainInFront = isVisible && (extendedState and java.awt.Frame.ICONIFIED) == 0
         watchHeadsets(live)
         refreshLine()
+        // A second call ringing beside the current one uses the same incoming window, with "Hold & answer".
+        val waitingRings = snap.waitingState == 1 && !WindowPrefs.dnd()
+        val cardParty = if (waitingRings) displayParty(snap.waitingRemote, "") else party
+        val cardExt = if (waitingRings) snap.waitingExtension.ifBlank { ext } else snap.callExtension.ifBlank { lastCallExt.ifBlank { ext } }
+        val cardPerson = ContactBook.nameFor(cardParty)
+        val cardNumber = displayNumber(cardParty)
         surfaces.sync(
-            incoming = ringing,
+            incoming = ringing || waitingRings,
             onCall = live,
-            party = party.ifBlank { inCallParty.text },
-            clock = inCallClock.text,
-            extension = ext,
+            card = net.ithandsfree.softphone.win.ui.CallCard(
+                title = cardPerson?.name ?: cardNumber.ifBlank { "Incoming call" },
+                titleIsNumber = cardPerson == null && cardNumber.isNotBlank(),
+                subtitle = when {
+                    cardPerson != null -> cardNumber
+                    cardNumber.isBlank() -> "Caller ID withheld"
+                    else -> "Not in contacts"
+                },
+                lineLabel = lineLabel(cardExt),
+                lineColorIndex = lineIndex(cardExt) ?: 0,
+                lineNumber = session.lines().firstOrNull { it.extension == cardExt }?.did
+                    ?.takeIf { it.isNotBlank() }?.let { displayNumber(it) },
+                waiting = waitingRings,
+            ),
+            clock = liveTimer.text.ifBlank { inCallClock.text },
             mainInFront = mainInFront,
             muted = snap.muted,
         )
         if (currentTab == "settings") {
-            val pin = pinBox
-            val quiet = dndBox
-            if (pin != null && !pin.isFocusOwner && pin.isSelected != WindowPrefs.pinned()) pin.isSelected = WindowPrefs.pinned()
-            if (quiet != null && !quiet.isFocusOwner && quiet.isSelected != WindowPrefs.dnd()) quiet.isSelected = WindowPrefs.dnd()
+            // The tray can change these too; keep the switches in step.
+            pinToggle?.set(WindowPrefs.pinned())
+            dndToggle?.set(WindowPrefs.dnd())
+            val line = session.line
+            echoCaption.text = "Calls the PBX echo test from ${lineLabel(line?.extension)}. Speak, and you'll hear yourself back."
         }
         if (live && speakerModel.size == 0) loadAudioDevices()
         val consulting = snap.consultActive
@@ -1749,7 +2960,7 @@ class PhoneFrame(
                 val on = runCatching { session.pbxDnd() }.getOrNull() ?: return@Thread
                 SwingUtilities.invokeLater {
                     WindowPrefs.saveDnd(on)
-                    dndBox?.isSelected = on
+                    dndToggle?.set(on)
                     if (::surfaces.isInitialized) surfaces.setToggles(WindowPrefs.pinned(), on)
                     if (on) CallRinger.stop()
                 }
@@ -1760,17 +2971,17 @@ class PhoneFrame(
     }
 
     private fun paintMicLevel() {
-        if (currentTab != "settings") return
+        val inCall = callMode == "live" && ::inCallPane.isInitialized
+        if (currentTab != "settings" && !inCall) return
         val heard = SipBridge.micLevel()
+        if (inCall) inCallPane.micLevel(heard)
+        if (currentTab != "settings") return
         val now = System.currentTimeMillis()
         if (heard >= micPeak || now - micPeakAt > 160) {
             micPeak = heard
             micPeakAt = now
         }
-        if (micPeak != micMeter.level) {
-            micMeter.level = micPeak
-            micMeter.repaint()
-        }
+        settingsMeter.level = micPeak
     }
 
     private fun requestLink(email: String) = work("Setup link") {
@@ -1916,25 +3127,44 @@ class PhoneFrame(
     private fun choosePhoto() {
         val chooser = javax.swing.JFileChooser()
         chooser.dialogTitle = "Photo"
+        chooser.fileFilter = javax.swing.filechooser.FileNameExtensionFilter("Pictures", "jpg", "jpeg", "png", "gif")
         if (chooser.showOpenDialog(this) != javax.swing.JFileChooser.APPROVE_OPTION) return
-        stagePhoto(chooser.selectedFile.readBytes(), chooser.selectedFile.name)
+        val bytes = readPhotoFile(chooser.selectedFile) ?: return
+        stagePhoto(bytes, chooser.selectedFile.name, "chosen")
     }
 
-    private fun stagePhoto(raw: ByteArray, name: String) {
+    private fun stagePhoto(raw: ByteArray, name: String, how: String = "added") {
         work("Photo") {
             val photo = prepareMmsPhoto(raw, name)
+            val thumb = runCatching { javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(photo.bytes)) }.getOrNull()
             SwingUtilities.invokeLater {
                 pendingPhoto = photo
                 attachNote.text = "  Photo · ${photo.bytes.size / 1024} KB  "
-                attachNote.isVisible = true
+                if (::attachCard.isInitialized) {
+                    attachCard.show(photo.name, "$how · ${photo.bytes.size / 1024} KB", thumb)
+                }
+                smsBody.requestFocusInWindow()
             }
         }
+    }
+
+    /** Reads a dropped or chosen file, refusing anything far beyond what MMS can carry. */
+    private fun readPhotoFile(file: java.io.File): ByteArray? {
+        if (!file.isFile) return null
+        if (file.length() > MAX_PHOTO_FILE) {
+            note("That file is ${file.length() / 1_048_576} MB. Choose a photo under 25 MB.")
+            return null
+        }
+        return file.readBytes()
     }
 
     private fun clearPhoto() {
         pendingPhoto = null
         attachNote.text = ""
-        attachNote.isVisible = false
+        if (::attachCard.isInitialized) {
+            attachCard.isVisible = false
+            attachCard.parent?.revalidate()
+        }
     }
 
     private fun photoTransfer(): javax.swing.TransferHandler {
@@ -1961,7 +3191,7 @@ class PhoneFrame(
                 if (transferable.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.imageFlavor)) {
                     val image = transferable.getTransferData(java.awt.datatransfer.DataFlavor.imageFlavor) as? java.awt.Image
                     if (image != null) {
-                        stagePhoto(pngBytes(image), "photo.png")
+                        stagePhoto(pngBytes(image), "screenshot.png", "pasted")
                         return true
                     }
                 }
@@ -1969,7 +3199,8 @@ class PhoneFrame(
                     val files = transferable.getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor) as? List<*>
                     val file = files?.filterIsInstance<java.io.File>()?.firstOrNull()
                     if (file != null) {
-                        stagePhoto(file.readBytes(), file.name)
+                        val bytes = readPhotoFile(file) ?: return false
+                        stagePhoto(bytes, file.name, "dropped")
                         return true
                     }
                 }
@@ -2029,62 +3260,53 @@ class PhoneFrame(
         if (detailOpen) selectedRecent()?.let { fillRecentDetail(it) }
     }
 
-    private fun recentRow(entry: CallEntry, index: Int): JPanel {
-        val selected = index == recentIndex
-        val row = JPanel(BorderLayout(8, 0))
-        row.background = if (selected) raised else ground
-        row.border = EmptyBorder(8, 4, 8, 4)
-        row.maximumSize = Dimension(Int.MAX_VALUE, 64)
-        val missed = entry.kind == "Missed"
-        val title = JLabel(formatDialDigits(entry.party))
-        title.font = uiBold
-        title.foreground = if (missed) coral else ink
-        val onLine = entry.extension.ifBlank { "" }
-        val second = listOfNotNull(
-            onLine.ifBlank { null },
-            entry.kind,
-            if (entry.seconds > 0) formatLiveCallTimer(entry.seconds) else null,
-            formatRecentWhen(entry.at),
-        ).joinToString(" · ")
-        val meta = JLabel(second)
-        meta.font = Font("Segoe UI", Font.PLAIN, UiScale.px(12))
-        meta.foreground = caption
-        val text = JPanel()
-        text.layout = BoxLayout(text, BoxLayout.Y_AXIS)
-        text.isOpaque = false
-        text.add(title)
-        text.add(meta)
-        val ext = entry.extension.ifBlank { session.line?.extension?.ifBlank { null } ?: "this line" }
-        val callTip = if (recentCanCall(entry.party)) "Call back from $ext" else "Caller ID withheld"
+    private fun recentRow(entry: CallEntry, index: Int): JComponent {
+        val person = ContactBook.nameFor(entry.party)
+        val shownNumber = displayNumber(entry.party)
+        val title = person?.name ?: shownNumber
+        val kind = when (entry.kind) {
+            "Missed" -> net.ithandsfree.softphone.win.ui.RecentRow.Kind.MISSED
+            "Outgoing" -> net.ithandsfree.softphone.win.ui.RecentRow.Kind.OUTGOING
+            else -> net.ithandsfree.softphone.win.ui.RecentRow.Kind.INCOMING
+        }
+        val lineName = entry.extension.takeIf { it.isNotBlank() }?.let { lineLabel(it) }
+        val callLine = lineLabel(entry.extension.ifBlank { session.line?.extension })
         val textBlock = recentTextBlock(entry.party)
-        val actions = JPanel()
-        actions.isOpaque = false
-        actions.add(recentButton("Call", true, recentCanCall(entry.party), callTip) { callRecent(entry) })
-        actions.add(recentButton("Message", false, textBlock == null, textBlock ?: "Message from $ext") { messageRecent(entry) })
-        actions.add(recentButton("···", false, true, "More actions") { button ->
-            recentMenu(entry).show(button, 0, button.height)
-        })
-        row.add(text, BorderLayout.CENTER)
-        row.add(actions, BorderLayout.EAST)
-        row.addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mousePressed(event: java.awt.event.MouseEvent) {
-                if (event.isPopupTrigger) showPopup(event)
-            }
-            override fun mouseReleased(event: java.awt.event.MouseEvent) {
-                if (event.isPopupTrigger) showPopup(event)
-            }
-            override fun mouseClicked(event: java.awt.event.MouseEvent) {
-                if (event.isPopupTrigger || javax.swing.SwingUtilities.isRightMouseButton(event)) return
+        val length = if (entry.seconds > 0) formatLiveCallTimer(entry.seconds) else null
+        val whenText = formatRecentWhen(entry.at)
+        val item = net.ithandsfree.softphone.win.ui.RecentRow.Item(
+            title = title,
+            titleIsNumber = person == null && title.any { it.isDigit() },
+            kind = kind,
+            lineLabel = if (session.lines().size > 1 || lineName != null) lineName else null,
+            lineColorIndex = lineIndex(entry.extension),
+            kindText = if (kind == net.ithandsfree.softphone.win.ui.RecentRow.Kind.MISSED) "Missed" else "",
+            duration = length,
+            whenText = whenText,
+            callEnabled = recentCanCall(entry.party),
+            callTip = if (recentCanCall(entry.party)) "Call from $callLine (Enter)" else "Caller ID withheld",
+            messageEnabled = textBlock == null,
+            messageTip = textBlock ?: "Message from $callLine (M)",
+            accessibleLabel = "${entry.kind} call ${if (entry.kind == "Outgoing") "to" else "from"} $title" +
+                (lineName?.let { " on $it" } ?: "") + ", $whenText",
+        )
+        val selected = index == recentIndex
+        return net.ithandsfree.softphone.win.ui.RecentRow(tokens, item, selected, object : net.ithandsfree.softphone.win.ui.RecentRow.Actions {
+            override fun open() {
                 recentIndex = index
                 openRecentDetail(entry)
             }
-            private fun showPopup(event: java.awt.event.MouseEvent) {
+            override fun call() = callRecent(entry)
+            override fun message() = messageRecent(entry)
+            override fun more(anchor: JComponent) {
                 recentIndex = index
-                recentMenu(entry).show(row, event.x, event.y)
-                reloadRecents()
+                recentMenu(entry).show(anchor, 0, anchor.height + 4)
+            }
+            override fun context(e: java.awt.event.MouseEvent) {
+                recentIndex = index
+                recentMenu(entry).show(e.component, e.x, e.y)
             }
         })
-        return row
     }
 
     private fun recentButton(
@@ -2108,19 +3330,43 @@ class PhoneFrame(
 
     private fun recentMenu(entry: CallEntry): javax.swing.JPopupMenu {
         val menu = javax.swing.JPopupMenu()
-        val ext = entry.extension.ifBlank { session.line?.extension?.ifBlank { null } ?: "this line" }
-        val call = menu.add("Call back from $ext")
-        call.isEnabled = recentCanCall(entry.party)
-        call.addActionListener { callRecent(entry) }
+        val ext = entry.extension.ifBlank { session.line?.extension.orEmpty() }
+        fun item(text: String, icon: String, key: String?, enabled: Boolean = true, action: () -> Unit): javax.swing.JMenuItem {
+            val row = javax.swing.JMenuItem(text, net.ithandsfree.softphone.win.ui.Icons.get(icon, 16, if (enabled) ink else tokens.textDisabled))
+            row.font = net.ithandsfree.softphone.win.ui.Type.ui(net.ithandsfree.softphone.win.ui.Type.LABEL + 1)
+            row.isEnabled = enabled
+            row.iconTextGap = 10
+            row.border = EmptyBorder(8, 10, 8, 12)
+            if (key != null) row.putClientProperty("JMenuItem.acceleratorText", key)
+            row.addActionListener { action() }
+            menu.add(row)
+            return row
+        }
+        val canCall = recentCanCall(entry.party)
+        item("Call back from ${lineLabel(ext)}", "phone", "Enter", canCall) { callRecent(entry) }
+        session.lines().filter { it.extension != ext }.forEach { other ->
+            item("Call from ${lineLabel(other.extension)}", "phone", null, canCall) {
+                session.choose(other.extension)
+                dial.text = entry.party
+                showTab("calls")
+                placeCall()
+            }
+        }
         val textBlock = recentTextBlock(entry.party)
-        val message = menu.add(if (textBlock == null) "Message from $ext" else "Message")
-        message.isEnabled = textBlock == null
-        message.addActionListener { messageRecent(entry) }
-        if (textBlock != null) menu.add(textBlock).isEnabled = false
+        item("Message from ${lineLabel(ext)}", "msg", "M", textBlock == null) { messageRecent(entry) }
+        if (textBlock != null) {
+            menu.add(javax.swing.JMenuItem(textBlock).apply { isEnabled = false; font = net.ithandsfree.softphone.win.ui.Type.ui(12f) })
+        }
         menu.addSeparator()
-        menu.add("Copy number").addActionListener { copyRecent(entry) }
-        if (recentCanCall(entry.party)) menu.add("Add to contacts").addActionListener { saveContact(entry.party) }
-        menu.add("Remove from recents").addActionListener { removeRecent(entry) }
+        item("Copy number", "clipboard", "Ctrl Shift C") { copyRecent(entry) }
+        val saved = ContactBook.nameFor(entry.party)
+        if (canCall && saved == null) item("Add to contacts", "user-plus", null) { saveContact(entry.party) }
+        menu.addSeparator()
+        item("Remove from recents", "trash", "Del") { removeRecent(entry) }
+        menu.border = BorderFactory.createCompoundBorder(
+            net.ithandsfree.softphone.win.ui.RoundBorder(tokens.hairline, 12),
+            EmptyBorder(6, 6, 6, 6),
+        )
         return menu
     }
 
@@ -2234,7 +3480,7 @@ class PhoneFrame(
     }
 
     private fun copyRecent(entry: CallEntry) {
-        val shown = formatDialDigits(entry.party)
+        val shown = displayNumber(entry.party)
         toolkit.systemClipboard.setContents(java.awt.datatransfer.StringSelection(shown), null)
         note("Copied $shown")
     }
@@ -2260,66 +3506,192 @@ class PhoneFrame(
         browsingDuringCall = false
         val onCall = SipBridge.snapshot().let { it.callActive || it.incoming }
         callDetailCards.show(callDetail, if (onCall) "live" else "pad")
+        if (compactMode) {
+            // Compact: back from a recent's detail returns to the list it was opened from.
+            narrowList = !onCall
+            applyWindowShape()
+        }
     }
 
     private fun fillRecentDetail(entry: CallEntry) {
-        val ext = entry.extension.ifBlank { session.line?.extension?.ifBlank { null } ?: "this line" }
-        detailTitle.text = formatDialDigits(entry.party)
-        val whenText = formatRecentWhen(entry.at)
-        val length = if (entry.seconds > 0) " · ${formatLiveCallTimer(entry.seconds)}" else ""
-        detailMeta.text = "${entry.kind} on $ext · $whenText$length"
-        detailMeta.foreground = if (entry.kind == "Missed") coral else muted
-        detailHistory.removeAll()
-        CallLog.load().filter { it.party == entry.party }.forEach { past ->
-            val length = if (past.seconds > 0) " · ${formatLiveCallTimer(past.seconds)}" else ""
-            val line = JLabel("${past.kind} · ${formatRecentWhen(past.at)}$length")
-            line.font = uiFont
-            line.foreground = ink
-            line.alignmentX = Component.LEFT_ALIGNMENT
-            detailHistory.add(line)
-            detailHistory.add(Box.createVerticalStrut(6))
+        if (!::callDetailPane.isInitialized) return
+        val ext = entry.extension.ifBlank { session.line?.extension.orEmpty() }
+        val label = lineLabel(ext)
+        val line = session.lines().firstOrNull { it.extension == ext }
+        val person = ContactBook.nameFor(entry.party)
+        val title = person?.name ?: displayNumber(entry.party)
+        val firstName = person?.name?.substringBefore(' ')
+        val missed = entry.kind == "Missed"
+        val canCall = recentCanCall(entry.party)
+        val textBlock = recentTextBlock(entry.party)
+        val zone = java.time.ZoneId.systemDefault()
+        val whenDay = java.time.Instant.ofEpochMilli(entry.at).atZone(zone).toLocalDate()
+        val clock = java.time.Instant.ofEpochMilli(entry.at).atZone(zone)
+            .format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US))
+        val whenText = when (whenDay) {
+            java.time.LocalDate.now(zone) -> "today $clock"
+            java.time.LocalDate.now(zone).minusDays(1) -> "yesterday $clock"
+            else -> "${formatRecentWhen(entry.at)} $clock"
         }
-        detailHistory.revalidate()
+        val others = session.lines().filter { it.extension != ext }.map { it.extension to lineLabel(it.extension) }
+        val pbx = pbxCalls[ext]
+        if (pbx == null || System.currentTimeMillis() - pbx.second > 30_000) loadPbxCalls(ext, entry)
+        val pbxCallsForLine = pbx?.first
+        val history = CallLog.load().filter { sameNumber(it.party, entry.party) }.take(8).map { past ->
+            val pastExt = past.extension.ifBlank { ext }
+            val pbxRows = if (pastExt == ext) pbxCallsForLine else pbxCalls[pastExt]?.first
+            val match = pbxRows?.let { matchPbxCall(past.party, past.at, past.seconds, it.calls) }
+            val canPlay = match?.recording == true && pbxRows.permissions.playback
+            val length = if (past.seconds > 0) " · ${formatLiveCallTimer(past.seconds)}" else ""
+            net.ithandsfree.softphone.win.ui.CallDetailPane.History(
+                icon = when (past.kind) { "Missed" -> "missed"; "Outgoing" -> "out"; else -> "in" },
+                text = if (past.kind == "Missed") "Missed call" else "${past.kind}$length",
+                mono = false,
+                danger = past.kind == "Missed",
+                lineLabel = past.extension.takeIf { it.isNotBlank() }?.let { lineLabel(it) },
+                lineColorIndex = lineIndex(past.extension),
+                whenText = formatRecentWhen(past.at),
+                recordingId = if (canPlay) "$pastExt|${match?.id}" else null,
+                canDownload = canPlay && pbxRows?.permissions?.download == true,
+            )
+        }.toMutableList()
+        // Latest text with this number on the line the call used, if the thread list is loaded for it.
+        if (session.line?.extension == ext) {
+            allThreads.firstOrNull { sameNumber(it.peer, entry.party) }?.let { thread ->
+                history.add(
+                    0,
+                    net.ithandsfree.softphone.win.ui.CallDetailPane.History(
+                        icon = "msg",
+                        text = "“${thread.snippet.orEmpty().take(48)}”",
+                        mono = false,
+                        danger = false,
+                        lineLabel = label,
+                        lineColorIndex = lineIndex(ext),
+                        whenText = epochMsOf(thread.lastMessageAt)?.let { formatRecentWhen(it) }.orEmpty(),
+                        openable = true,
+                    ),
+                )
+            }
+        }
+        callDetailPane.show(
+            net.ithandsfree.softphone.win.ui.CallDetailPane.Model(
+                title = title,
+                titleIsNumber = person == null,
+                subtitle = if (person != null) displayNumber(entry.party) else "",
+                statusIcon = when (entry.kind) { "Missed" -> "missed"; "Outgoing" -> "out"; else -> "in" },
+                statusText = when (entry.kind) {
+                    "Missed" -> "Missed call on"
+                    "Outgoing" -> "You called from"
+                    else -> "Answered on"
+                },
+                statusDanger = missed,
+                lineLabel = label,
+                lineColorIndex = lineIndex(ext) ?: 0,
+                lineNumber = line?.did?.takeIf { it.isNotBlank() }?.let { displayNumber(it) },
+                whenText = whenText,
+                callLabel = "Call back from $label",
+                otherLines = others,
+                canCall = canCall,
+                callTip = if (canCall) "Call back from $label (Enter)" else "Caller ID withheld",
+                canMessage = textBlock == null,
+                messageTip = textBlock ?: "Message from $label (M)",
+                hasContact = person != null,
+                explanation = when {
+                    others.isEmpty() -> "Calls and texts go from $label."
+                    firstName != null && entry.kind != "Outgoing" ->
+                        "Calls and texts go from $label, the line $firstName called. The arrow offers ${others.joinToString { it.second }}."
+                    else -> "Calls and texts go from $label, the line used for this call. The arrow offers ${others.joinToString { it.second }}."
+                },
+                historyTitle = "History with ${firstName ?: "this number"}",
+                history = history,
+            ),
+        )
     }
 
     private fun recentDetail(): JPanel {
-        val page = JPanel()
-        page.layout = BoxLayout(page, BoxLayout.Y_AXIS)
-        page.background = ground
-        page.border = EmptyBorder(28, 32, 24, 32)
-        detailTitle.font = Font("Georgia", Font.PLAIN, UiScale.px(32))
-        detailTitle.foreground = ink
-        detailTitle.alignmentX = Component.LEFT_ALIGNMENT
-        detailMeta.font = uiFont
-        detailMeta.alignmentX = Component.LEFT_ALIGNMENT
-        detailHistory.layout = BoxLayout(detailHistory, BoxLayout.Y_AXIS)
-        detailHistory.background = ground
-        detailHistory.alignmentX = Component.LEFT_ALIGNMENT
-        val keypad = ghost("Keypad", expand = false) { closeRecentDetail() }
-        val call = WelcomeButton("Call back", gold, goldInk, expand = false)
-        call.addActionListener { selectedRecent()?.let { callRecent(it) } }
-        val message = ghost("Message", expand = false) { selectedRecent()?.let { messageRecent(it) } }
-        val copy = ghost("Copy number", expand = false) { selectedRecent()?.let { copyRecent(it) } }
-        val save = ghost("Add to contacts", expand = false) { selectedRecent()?.let { saveContact(it.party) } }
-        val actions = JPanel()
-        actions.background = ground
-        actions.alignmentX = Component.LEFT_ALIGNMENT
-        actions.add(call)
-        actions.add(message)
-        actions.add(copy)
-        actions.add(save)
-        page.add(keypad)
-        page.add(Box.createVerticalStrut(16))
-        page.add(detailTitle)
-        page.add(Box.createVerticalStrut(6))
-        page.add(detailMeta)
-        page.add(Box.createVerticalStrut(16))
-        page.add(actions)
-        page.add(Box.createVerticalStrut(18))
-        page.add(JLabel("History").apply { font = uiBold; foreground = gold; alignmentX = Component.LEFT_ALIGNMENT })
-        page.add(Box.createVerticalStrut(8))
-        page.add(detailHistory)
-        return page
+        callDetailPane = net.ithandsfree.softphone.win.ui.CallDetailPane(tokens, object : net.ithandsfree.softphone.win.ui.CallDetailPane.Actions {
+            override fun callBack() { selectedRecent()?.let { callRecent(it) } }
+            override fun callFrom(extension: String) {
+                val entry = selectedRecent() ?: return
+                session.choose(extension)
+                dial.text = entry.party
+                placeCall()
+            }
+            override fun message() { selectedRecent()?.let { messageRecent(it) } }
+            override fun copy() { selectedRecent()?.let { copyRecent(it) } }
+            override fun contact() { selectedRecent()?.let { saveContact(it.party) } }
+            override fun keypad() = closeRecentDetail()
+            override fun playRecording(callId: String) = this@PhoneFrame.playRecording(callId)
+            override fun saveRecording(callId: String) = this@PhoneFrame.saveRecording(callId)
+            override fun openThread() {
+                val entry = selectedRecent() ?: return
+                showTab("messages")
+                allThreads.firstOrNull { sameNumber(it.peer, entry.party) }?.let { openThreadFor(it) }
+            }
+        })
+        return callDetailPane
+    }
+
+    /** PBX history per extension with when it was fetched; null response = not permitted (403) or failed. */
+    private val pbxCalls = java.util.concurrent.ConcurrentHashMap<String, Pair<CallsResponse?, Long>>()
+    private val recordingPlayer = RecordingPlayer()
+
+    /** Fetches the PBX call history for [ext] and redraws [entry]'s detail if it is still open. */
+    private fun loadPbxCalls(ext: String, entry: CallEntry) {
+        val line = session.lines().firstOrNull { it.extension == ext } ?: return
+        pbxCalls[ext] = (pbxCalls[ext]?.first) to System.currentTimeMillis()
+        io.submit {
+            val result = try {
+                session.pbxCalls(line)
+            } catch (err: Exception) {
+                null // 403 (UCP Call History off for this user/extension) or offline: no recordings shown
+            }
+            pbxCalls[ext] = result to System.currentTimeMillis()
+            SwingUtilities.invokeLater {
+                if (detailOpen && selectedRecent() == entry) fillRecentDetail(entry)
+            }
+        }
+    }
+
+    private fun playRecording(key: String) {
+        val (ext, callId) = key.split('|', limit = 2).let { it[0] to it.getOrElse(1) { "" } }
+        if (recordingPlayer.playing == key) {
+            recordingPlayer.stop()
+            callDetailPane.playing(null)
+            return
+        }
+        val line = session.lines().firstOrNull { it.extension == ext } ?: return
+        work("Recording") {
+            val audio = session.recording(line, callId)
+            SwingUtilities.invokeLater {
+                recordingPlayer.play(key, audio, AudioPrefs.playbackName()) { SwingUtilities.invokeLater { callDetailPane.playing(null) } }
+                callDetailPane.playing(key)
+            }
+        }
+    }
+
+    private fun saveRecording(key: String) {
+        val (ext, callId) = key.split('|', limit = 2).let { it[0] to it.getOrElse(1) { "" } }
+        val line = session.lines().firstOrNull { it.extension == ext } ?: return
+        val entry = selectedRecent()
+        val chooser = javax.swing.JFileChooser()
+        chooser.dialogTitle = "Save call recording"
+        val stamp = java.time.Instant.ofEpochMilli(entry?.at ?: System.currentTimeMillis())
+            .atZone(java.time.ZoneId.systemDefault())
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HHmm"))
+        chooser.selectedFile = java.io.File("Call $stamp ${entry?.party?.filter { it.isLetterOrDigit() || it == '+' }.orEmpty()}.wav")
+        if (chooser.showSaveDialog(this) != javax.swing.JFileChooser.APPROVE_OPTION) return
+        val target = chooser.selectedFile
+        work("Recording") {
+            target.writeBytes(session.recording(line, callId, download = true))
+            note("Saved ${target.name}")
+        }
+    }
+
+    /** Opens a thread and selects it in the list. */
+    private fun openThreadFor(thread: ThreadInfo) {
+        val index = (0 until threadModel.size()).firstOrNull { threadModel[it].peer == thread.peer }
+        if (index != null) threadList.selectedIndex = index else openThread(thread)
     }
 
     private fun refreshThreads(notify: Boolean = false) {
@@ -2330,27 +3702,31 @@ class PhoneFrame(
             SwingUtilities.invokeLater {
                 val signature = rows.joinToString("\n") { "${it.peer}\t${it.unread}\t${it.snippet.orEmpty()}" }
                 if (signature == threadSignature) return@invokeLater
+                val before = threadSignature
                 threadSignature = signature
                 val grew = knownUnread >= 0 && unread > knownUnread
                 val keepPeer = threadList.selectedValue?.peer
-                suppressThreadOpen = true
-                threadModel.clear()
-                rows.forEach { threadModel.addElement(it) }
-                val keep = rows.indexOfFirst { it.peer == keepPeer }
-                if (keep >= 0) threadList.selectedIndex = keep
-                suppressThreadOpen = false
-                knownUnread = unread
-                (tabs["messages"] as? RailButton)?.setCount(unread)
-                if (notify && grew) {
-                    val peer = rows.firstOrNull { it.unread > 0 }?.peer?.ifBlank { null } ?: "a contact"
-                    note("New message")
-                    surfaces.notifyMessage(peer)
-                    if (!keepPeer.isNullOrBlank() && rows.any { it.peer == keepPeer && it.unread > 0 }) {
+                // Reload the open conversation when its last message changes. Unread alone misses a reply that
+                // the phone on the same line has already opened (it is then read before this PC polls).
+                if (!keepPeer.isNullOrBlank() && (currentTab == "messages" || currentTab == "thread")) {
+                    val was = before.lineSequence().firstOrNull { it.startsWith("$keepPeer\t") }?.substringAfterLast('\t')
+                    val now = rows.firstOrNull { it.peer == keepPeer }?.snippet.orEmpty()
+                    if (was != now) {
                         work("Thread") {
                             val messages = session.conversation(keepPeer)
                             SwingUtilities.invokeLater { showTranscript(messages) }
                         }
                     }
+                }
+                allThreads = rows
+                filterThreads()
+                knownUnread = unread
+                navRail.badge("messages", unread, danger = false)
+                if (::bottomNav.isInitialized) bottomNav.badge("messages", unread, danger = false)
+                if (notify && grew) {
+                    val peer = rows.firstOrNull { it.unread > 0 }?.peer?.ifBlank { null } ?: "a contact"
+                    note("New message")
+                    surfaces.notifyMessage(peer)
                 }
             }
         }
@@ -2360,6 +3736,10 @@ class PhoneFrame(
         val peer = thread.peer.ifBlank { "Message" }
         threadTitle.text = peer
         smsTo.text = thread.peer
+        showConversationFor(thread.peer)
+        transcript.removeAll()
+        transcript.revalidate()
+        transcript.repaint()
         work("Thread") {
             val rows = session.conversation(thread.peer)
             SwingUtilities.invokeLater { showTranscript(rows) }
@@ -2367,81 +3747,93 @@ class PhoneFrame(
     }
 
     private fun showTranscript(rows: List<MessageInfo>) {
+        val t = tokens
         transcript.removeAll()
         if (rows.isEmpty()) {
-            transcript.add(label("No messages yet."))
+            transcript.add(net.ithandsfree.softphone.win.ui.daySeparator(t, "No messages yet"))
         }
-        rows.forEach { row ->
+        val zone = java.time.ZoneId.systemDefault()
+        val today = java.time.LocalDate.now(zone)
+        var lastDay: java.time.LocalDate? = null
+        val clock = java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US)
+        val shown = net.ithandsfree.softphone.win.ui.collapseRepeats(
+            rows.sortedBy { it.epochMs ?: 0L },
+            key = { "${it.direction}|${it.body}|${it.media.joinToString { m -> m.name }}" },
+            at = { it.epochMs },
+        )
+        shown.forEach { row ->
             val inbound = row.direction.equals("in", ignoreCase = true)
-            val align = if (inbound) Component.LEFT_ALIGNMENT else Component.RIGHT_ALIGNMENT
-            val column = JPanel()
-            column.layout = BoxLayout(column, BoxLayout.Y_AXIS)
-            column.isOpaque = false
-            column.alignmentX = align
+            val at = row.epochMs?.let { java.time.Instant.ofEpochMilli(it).atZone(zone) }
+            val day = at?.toLocalDate()
+            if (day != null && day != lastDay) {
+                lastDay = day
+                val dayText = when (day) {
+                    today -> "Today"
+                    today.minusDays(1) -> "Yesterday"
+                    else -> day.format(java.time.format.DateTimeFormatter.ofPattern("EEE, MMM d", java.util.Locale.US))
+                }
+                transcript.add(net.ithandsfree.softphone.win.ui.daySeparator(t, dayText))
+            }
+            val timeText = at?.format(clock) ?: row.datetime.orEmpty()
             if (row.body.isNotBlank()) {
-                val bubble = JLabel("<html><body style='width:280px'>${escapeHtml(row.body)}</body></html>")
-                bubble.foreground = ink
-                bubble.background = if (inbound) surface else raised
-                bubble.isOpaque = true
-                bubble.border = EmptyBorder(10, 12, 10, 12)
-                bubble.alignmentX = align
-                column.add(bubble)
+                val bubble = net.ithandsfree.softphone.win.ui.TextBubble(t, row.body, inbound)
+                transcript.add(net.ithandsfree.softphone.win.ui.bubbleRow(t, bubble, inbound, timeText))
             }
             row.media.forEach { media ->
-                val photo = JLabel(if (row.body.isBlank()) "Photo" else "")
-                photo.foreground = caption
-                photo.alignmentX = align
-                column.add(Box.createVerticalStrut(6))
-                column.add(photo)
                 val source = media.name.ifBlank { media.url.orEmpty() }
-                if (source.isNotBlank()) {
-                    val cached = synchronized(photoCache) { photoCache[source] }
-                    if (cached != null) {
-                        photo.text = ""
-                        photo.icon = javax.swing.ImageIcon(cached)
-                        openPhoto(photo, synchronized(photoFull) { photoFull[source] } ?: cached)
-                    } else {
-                        work("Photo") {
-                            val bytes = runCatching { session.media(source) }.getOrNull()
-                            val image = bytes?.let { javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(it)) }
-                            SwingUtilities.invokeLater {
-                                if (image == null) {
-                                    photo.text = "Photo unavailable"
-                                    return@invokeLater
-                                }
-                                val maxW = 280.0
-                                val maxH = 220.0
-                                val scale = minOf(maxW / image.width, maxH / image.height, 1.0)
-                                val w = (image.width * scale).toInt().coerceAtLeast(1)
-                                val h = (image.height * scale).toInt().coerceAtLeast(1)
-                                val scaled = image.getScaledInstance(w, h, java.awt.Image.SCALE_SMOOTH)
-                                synchronized(photoCache) {
-                                    photoCache[source] = scaled
-                                    photoFull[source] = image
-                                    while (photoCache.size > 40) {
-                                        val first = photoCache.keys.first()
-                                        photoCache.remove(first)
-                                        photoFull.remove(first)
-                                    }
-                                }
-                                photo.text = ""
-                                photo.icon = javax.swing.ImageIcon(scaled)
-                                openPhoto(photo, image)
-                            }
+                val photo = net.ithandsfree.softphone.win.ui.PhotoBubble(t, "Photo")
+                transcript.add(net.ithandsfree.softphone.win.ui.bubbleRow(t, photo, inbound, timeText))
+                if (source.isBlank()) return@forEach
+                val cached = synchronized(photoCache) { photoCache[source] }
+                if (cached != null) {
+                    photo.show(cached)
+                    openPhoto(photo, source)
+                    return@forEach
+                }
+                work("Photo") {
+                    val image = loadPhoto(source)
+                    // Thumbnail at 2× the bubble size, scaled once off the UI thread, so it is sharp on HiDPI.
+                    val thumb = image?.let { net.ithandsfree.softphone.win.ui.fitImage(it, 520, 400) }
+                    SwingUtilities.invokeLater {
+                        if (image == null || thumb == null) {
+                            photo.show(null)
+                            return@invokeLater
                         }
+                        synchronized(photoCache) {
+                            photoCache[source] = thumb
+                            while (photoCache.size > 60) photoCache.remove(photoCache.keys.first())
+                        }
+                        val wasAtEnd = transcriptAtEnd()
+                        photo.show(thumb)
+                        photo.parent?.parent?.let { row -> (row as? JComponent)?.maximumSize = Dimension(Int.MAX_VALUE, row.preferredSize.height) }
+                        transcript.revalidate()
+                        openPhoto(photo, source)
+                        if (wasAtEnd) scrollTranscriptToEnd()
                     }
                 }
             }
-            val whenLabel = JLabel(row.datetime.orEmpty())
-            whenLabel.font = Font("Segoe UI", Font.PLAIN, UiScale.px(11))
-            whenLabel.foreground = caption
-            whenLabel.alignmentX = align
-            transcript.add(column)
-            transcript.add(whenLabel)
-            transcript.add(Box.createVerticalStrut(10))
         }
+        transcript.add(Box.createVerticalGlue())
         transcript.revalidate()
         transcript.repaint()
+        // Newest message in view, as in a chat app.
+        scrollTranscriptToEnd()
+    }
+
+    /** True when the transcript is scrolled to (or within 40 px of) the newest message. */
+    private fun transcriptAtEnd(): Boolean {
+        val bar = transcriptScroll?.verticalScrollBar ?: return true
+        return bar.value + bar.visibleAmount >= bar.maximum - 40
+    }
+
+    /** Scrolls after Swing has laid the new rows out; a single invokeLater runs before photo rows have height. */
+    private fun scrollTranscriptToEnd() {
+        SwingUtilities.invokeLater {
+            transcript.validate()
+            SwingUtilities.invokeLater {
+                transcriptScroll?.verticalScrollBar?.let { it.value = it.maximum }
+            }
+        }
     }
 
     private fun escapeHtml(value: String): String = value
@@ -2455,23 +3847,19 @@ class PhoneFrame(
 
     private fun paintLineControls(snap: SipBridge.Snapshot) {
         val lines = session.lines()
-        val key = lines.joinToString(",") { it.extension }
+        val key = lines.joinToString(",") { "${it.extension}:${it.label}:${it.signedIn}" }
         if (key != paintedLines) {
             paintedLines = key
             lineSwitch.removeAll()
             historyFilters.removeAll()
-            allRecentButton.putClientProperty("history", "all")
-            missedRecentButton.putClientProperty("history", "missed")
-            historyFilters.add(allRecentButton)
+            allChip.putClientProperty("history", "all")
+            missedChip.putClientProperty("history", "missed")
+            historyFilters.add(allChip)
             lines.forEach { enrolled ->
                 lineSwitch.add(callingLineButton(enrolled))
-                historyFilters.add(historyLineButton(enrolled.extension))
+                if (lines.size > 1) historyFilters.add(historyLineChip(enrolled.extension))
             }
-            historyFilters.add(missedRecentButton)
-            historyFilters.add(keypadJump)
-            lineList.removeAll()
-            if (lines.isEmpty()) lineList.add(pin(label("No line yet")))
-            lines.forEach { enrolled -> lineList.add(lineCard(enrolled)) }
+            historyFilters.add(missedChip)
             if (historyExtension != null && lines.none { it.extension == historyExtension }) historyExtension = null
         }
         styleLineButtons()
@@ -2491,7 +3879,8 @@ class PhoneFrame(
         }
         lineSwitch.revalidate()
         historyFilters.revalidate()
-        lineList.revalidate()
+        // Registration and counts on the Lines page; LinesPage.show skips the rebuild when nothing changed.
+        if (currentTab == "lines") refreshLinesPage()
     }
 
     private fun callingLineButton(enrolled: EnrolledLine): JButton {
@@ -2510,20 +3899,52 @@ class PhoneFrame(
         return button
     }
 
-    private fun historyLineButton(extension: String): JButton {
-        val button = JButton(extension)
-        button.putClientProperty("history", extension)
-        button.addActionListener {
+    private fun historyLineChip(extension: String): JComponent {
+        val chip = net.ithandsfree.softphone.win.ui.Chip(tokens, lineLabel(extension)) {
             missedOnly = false
             historyExtension = extension
             styleRecentFilters()
             reloadRecents()
         }
-        return button
+        chip.putClientProperty("history", extension)
+        chip.toolTipText = "Calls on $extension"
+        return chip
     }
 
     private fun styleLineButtons() {
         val chosen = session.line?.extension
+        lineRail.show(
+            session.lines().mapIndexed { index, line ->
+                net.ithandsfree.softphone.win.ui.LineRail.Segment(
+                    line.extension,
+                    lineLabel(line.extension),
+                    index,
+                    badge = missedSince(line.extension),
+                )
+            },
+            chosen,
+        )
+        messagesLineRail.show(
+            session.lines().mapIndexed { index, line ->
+                net.ithandsfree.softphone.win.ui.LineRail.Segment(line.extension, lineLabel(line.extension), index)
+            },
+            chosen,
+        )
+        threadSearch.putClientProperty(
+            com.formdev.flatlaf.FlatClientProperties.PLACEHOLDER_TEXT,
+            "Search ${lineLabel(chosen)} threads",
+        )
+        // Only when the line changed: this runs on every 300 ms poll.
+        val convoKey = "$chosen:${lineLabel(chosen)}"
+        if (::viaBar.isInitialized && convoKey != convoLineKey) {
+            convoLineKey = convoKey
+            showConversationFor(smsTo.text.takeIf { convoHeader.isVisible })
+        }
+        val index = lineIndex(chosen) ?: 0
+        if (::dialPad.isInitialized) {
+            val did = session.line?.did?.takeIf { it.isNotBlank() }
+            dialPad.line(lineLabel(chosen), did, index)
+        }
         lineSwitch.components.filterIsInstance<JButton>().forEach { button ->
             val on = button.getClientProperty("extension") == chosen
             button.foreground = if (on) goldInk else ink
@@ -2561,6 +3982,18 @@ class PhoneFrame(
             work("Do not disturb") { session.setPbxDnd(enrolled, dnd.isSelected) }
         }
         card.add(pin(dnd))
+        if (enrolled.signedIn) {
+            card.add(pin(mutedCopy("Messages sign in as ${escapeHtml(enrolled.umUsername)}")))
+            card.add(pin(ghost("Sign out", expand = false) {
+                session.signOut(enrolled.extension)
+                note("Signed out of ${enrolled.extension}. Calls keep working")
+                paintedLines = ""
+                paintLineControls(SipBridge.snapshot())
+            }))
+        } else {
+            card.add(pin(mutedCopy("Set up from a link. Sign in so messages keep working after the link expires.")))
+            card.add(pin(ghost("Sign in", expand = false) { openSignIn(enrolled.extension) }))
+        }
         card.add(Box.createVerticalStrut(12))
         work("Do not disturb") {
             val enabled = runCatching { session.pbxDnd(enrolled) }.getOrDefault(false)
@@ -2599,6 +4032,10 @@ class PhoneFrame(
 
     private fun missedSinceSeen(): Int =
         CallLog.load().count { it.kind == "Missed" && it.at > seenMissedAt }
+
+    /** Missed calls on one line since the user last looked at Calls (line rail badge). */
+    private fun missedSince(extension: String): Int =
+        recentEntries.count { it.kind == "Missed" && it.at > seenMissedAt && it.extension == extension }
 
     private fun markMissedSeen() {
         val latest = CallLog.load().filter { it.kind == "Missed" }.maxOfOrNull { it.at } ?: return
@@ -2646,6 +4083,7 @@ class PhoneFrame(
 
     private fun showRoot(name: String) {
         if (::welcomeBack.isInitialized) welcomeBack.isVisible = session.lines().isNotEmpty()
+        if (::titleBar.isInitialized) titleBar.search.isVisible = name == "app"
         rootCards.show(root, name)
     }
 
@@ -2656,13 +4094,21 @@ class PhoneFrame(
     private var flashedIncoming = false
 
     private fun showTab(name: String) {
+        if (name != "settings" && capturingRow != null) {
+            endCapture()
+            Shortcut.entries.forEach { paintShortcutRow(it) }
+            applyGlobalHotkeys()
+        }
         currentTab = name
         appCards.show(appBody, name)
-        tabs.forEach { (id, button) ->
-            val on = id == name || (name == "thread" && id == "messages")
-            (button as? RailButton)?.setChosen(on)
-            button.foreground = if (on) gold else muted
-            button.background = if (on) raised else ground
+        if (::navRail.isInitialized) navRail.choose(if (name == "thread") "messages" else name)
+        if (::bottomNav.isInitialized) bottomNav.choose(if (name == "thread") "messages" else name)
+        if (name == "lines") {
+            refreshLinesPage()
+            loadLineFacts()
+        }
+        if (name == "settings" && ::settingsShell.isInitialized) {
+            settingsShell.lines(session.lines().mapIndexed { index, line -> Triple(lineLabel(line.extension), line.extension, index) })
         }
     }
 
@@ -2670,16 +4116,23 @@ class PhoneFrame(
         io.submit {
             try {
                 block()
+            } catch (err: SignInNeeded) {
+                note(err.message.orEmpty())
             } catch (err: Exception) {
+                DiagLog.app("$name failed: ${err.stackTraceToString().take(1500)}")
                 note("$name failed: ${err.message ?: err.javaClass.simpleName}")
             }
         }
     }
 
     private fun note(line: String) {
+        DiagLog.app("shown: $line")
         SwingUtilities.invokeLater {
             status.text = line
             status.foreground = if (line.contains("failed", ignoreCase = true)) coral else muted
+            if (::toast.isInitialized) {
+                toast.show(line, isError = line.contains("failed", ignoreCase = true) || line.contains("need a sign-in"))
+            }
         }
     }
 

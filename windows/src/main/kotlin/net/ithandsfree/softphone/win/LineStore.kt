@@ -11,14 +11,19 @@ internal object LineStore {
         write(file(), line)
     }
 
+    /** Forgets the older single-line copy (last line removed), so the next start shows setup. */
+    fun clear() {
+        file().delete()
+    }
+
     internal fun read(file: File): EnrolledLine? {
         if (!file.isFile) return null
         val props = Properties()
         file.inputStream().use { props.load(it) }
-        val token = props.getProperty("token").orEmpty()
+        val token = SecretBox.open(props.getProperty("token").orEmpty())
         val did = props.getProperty("did").orEmpty()
         val extension = props.getProperty("extension").orEmpty()
-        val secret = props.getProperty("secret").orEmpty()
+        val secret = SecretBox.open(props.getProperty("secret").orEmpty())
         val domain = props.getProperty("domain").orEmpty()
         if (token.isBlank() || did.isBlank() || extension.isBlank() || secret.isBlank() || domain.isBlank()) return null
         return EnrolledLine(
@@ -33,10 +38,11 @@ internal object LineStore {
 
     internal fun write(file: File, line: EnrolledLine) {
         val props = Properties()
-        props.setProperty("token", line.token)
+        // Sealed like lines.properties. A build older than 0.1.33 can no longer read it and shows setup instead.
+        props.setProperty("token", SecretBox.seal(line.token))
         props.setProperty("did", line.did)
         props.setProperty("extension", line.extension)
-        props.setProperty("secret", line.sipPassword)
+        props.setProperty("secret", SecretBox.seal(line.sipPassword))
         props.setProperty("domain", line.sipDomain)
         props.setProperty("name", line.displayName)
         file.parentFile?.mkdirs()

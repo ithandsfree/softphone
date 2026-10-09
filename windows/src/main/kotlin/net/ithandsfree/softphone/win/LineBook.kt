@@ -24,23 +24,35 @@ internal object LineBook {
 
     fun save(lines: List<EnrolledLine>, defaultExtension: String) {
         val kept = lines.take(MAX)
-        val props = Properties()
-        props.setProperty("count", kept.size.toString())
         val fallback = kept.firstOrNull()?.extension.orEmpty()
         val chosen = defaultExtension.takeIf { ext -> kept.any { it.extension == ext } } ?: fallback
-        props.setProperty("default", chosen)
-        kept.forEachIndexed { index, line ->
-            props.setProperty("$index.token", line.token)
+        write(file(), kept, chosen)
+        kept.firstOrNull { it.extension == chosen }?.let { LineStore.save(it) }
+    }
+
+    internal fun write(stored: File, lines: List<EnrolledLine>, defaultExtension: String) {
+        val props = Properties()
+        props.setProperty("count", lines.size.toString())
+        props.setProperty("default", defaultExtension)
+        lines.forEachIndexed { index, line ->
+            props.setProperty("$index.token", SecretBox.seal(line.token))
             props.setProperty("$index.did", line.did)
             props.setProperty("$index.extension", line.extension)
-            props.setProperty("$index.secret", line.sipPassword)
+            props.setProperty("$index.secret", SecretBox.seal(line.sipPassword))
             props.setProperty("$index.domain", line.sipDomain)
             props.setProperty("$index.name", line.displayName)
+            if (line.label.isNotBlank()) props.setProperty("$index.label", line.label)
+            if (line.signedIn) {
+                props.setProperty("$index.umUser", line.umUsername)
+                props.setProperty("$index.umPassword", SecretBox.seal(line.umPassword))
+            }
         }
-        val stored = file()
+        write(stored, props)
+    }
+
+    private fun write(stored: File, props: Properties) {
         stored.parentFile?.mkdirs()
-        stored.outputStream().use { props.store(it, "IHF Phone lines") }
-        kept.firstOrNull { it.extension == chosen }?.let { LineStore.save(it) }
+        stored.outputStream().use { props.store(it, "IHF Phone lines. Secrets are sealed with Windows DPAPI.") }
     }
 
     internal fun read(stored: File): List<EnrolledLine> {
@@ -49,10 +61,10 @@ internal object LineBook {
         stored.inputStream().use { props.load(it) }
         val count = props.getProperty("count")?.toIntOrNull() ?: return emptyList()
         return (0 until count.coerceAtMost(MAX)).mapNotNull { index ->
-            val token = props.getProperty("$index.token").orEmpty()
+            val token = SecretBox.open(props.getProperty("$index.token").orEmpty())
             val did = props.getProperty("$index.did").orEmpty()
             val extension = props.getProperty("$index.extension").orEmpty()
-            val secret = props.getProperty("$index.secret").orEmpty()
+            val secret = SecretBox.open(props.getProperty("$index.secret").orEmpty())
             val domain = props.getProperty("$index.domain").orEmpty()
             if (token.isBlank() || did.isBlank() || extension.isBlank() || secret.isBlank() || domain.isBlank()) {
                 null
@@ -64,9 +76,22 @@ internal object LineBook {
                     sipPassword = secret,
                     sipDomain = domain,
                     displayName = props.getProperty("$index.name").orEmpty().ifBlank { extension },
+                    umUsername = props.getProperty("$index.umUser").orEmpty(),
+                    umPassword = SecretBox.open(props.getProperty("$index.umPassword").orEmpty()),
+                    label = props.getProperty("$index.label").orEmpty(),
                 )
             }
         }
+    }
+
+    /** True when a stored secret is still plain text from an older build. */
+    internal fun hasPlainSecrets(stored: File = file()): Boolean {
+        if (!stored.isFile) return false
+        val props = Properties()
+        stored.inputStream().use { props.load(it) }
+        return props.stringPropertyNames()
+            .filter { it.endsWith(".token") || it.endsWith(".secret") || it.endsWith(".umPassword") }
+            .any { key -> props.getProperty(key).let { it.isNotEmpty() && !SecretBox.isSealed(it) } }
     }
 
     private fun file(): File {

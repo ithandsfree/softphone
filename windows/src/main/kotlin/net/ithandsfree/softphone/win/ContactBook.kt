@@ -26,6 +26,9 @@ internal object ContactBook {
         write(next)
     }
 
+    /** The saved person for a number, ignoring formatting and the NANP leading 1. */
+    fun nameFor(number: String): Person? = load().firstOrNull { sameNumber(it.number, number) }
+
     fun match(query: String): List<Person> {
         val needle = query.trim()
         if (needle.isBlank()) return emptyList()

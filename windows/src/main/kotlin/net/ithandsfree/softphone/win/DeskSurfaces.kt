@@ -26,6 +26,11 @@ import javax.swing.WindowConstants
 import javax.swing.border.EmptyBorder
 /** Short original ring. Looped while a call is incoming. */
 internal object CallRinger {
+    /** Line of the incoming call; its own ringtone wins over the default (set before [start]). */
+    @Volatile var lineExtension: String? = null
+
+    private fun style(): String = AudioPrefs.ringtoneStyleFor(lineExtension)
+
     private var clip: Clip? = null
     private var extra: Clip? = null
     private var nativeRing = false
@@ -35,17 +40,17 @@ internal object CallRinger {
         val playback = AudioPrefs.playbackName()
         if (playback.isBlank() || SipBridge.loadError != null || !AudioPrefs.applySaved()) return false
         val custom = AudioPrefs.ringtoneFile()
-        if (AudioPrefs.ringtoneStyle() == RingtoneLibrary.CUSTOM && custom != null &&
+        if (style() == RingtoneLibrary.CUSTOM && custom != null &&
             !custom.extension.equals("wav", ignoreCase = true)
         ) {
             return false
         }
-        val wav = if (AudioPrefs.ringtoneStyle() == RingtoneLibrary.CUSTOM && custom != null) {
+        val wav = if (style() == RingtoneLibrary.CUSTOM && custom != null) {
             custom
         } else {
             val folder = File(System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() } ?: System.getProperty("java.io.tmpdir"), "IHF Phone")
             val file = File(folder, "ring-tone.wav")
-            runCatching { RingtoneLibrary.writeLoopWav(AudioPrefs.ringtoneStyle(), file) }.getOrNull() ?: return false
+            runCatching { RingtoneLibrary.writeLoopWav(style(), file) }.getOrNull() ?: return false
             file
         }
         if (SipBridge.ringStart(wav.absolutePath) != 0) return false
@@ -59,7 +64,7 @@ internal object CallRinger {
         if (AudioPrefs.playbackName().isNotBlank()) {
             val mixer = pairCaptureName(AudioPrefs.playbackName(), outputNames())
             if (mixer != null) {
-                val style = AudioPrefs.ringtoneStyle()
+                val style = style()
                 val custom = if (style == RingtoneLibrary.CUSTOM) AudioPrefs.ringtoneFile() else null
                 val created = if (custom != null) {
                     runCatching { clipFromNamedFile(custom, mixer) }.getOrNull()
@@ -73,7 +78,7 @@ internal object CallRinger {
             }
             return
         }
-        val style = AudioPrefs.ringtoneStyle()
+        val style = style()
         val custom = if (style == RingtoneLibrary.CUSTOM) AudioPrefs.ringtoneFile() else null
         val fromFile = if (custom != null) runCatching { clipFromFile(custom, AudioPrefs.ringerName()) }.getOrNull() else null
         val created = fromFile
@@ -194,6 +199,8 @@ internal class DeskSurfaces(
     private val onOpen: () -> Unit,
     private val onQuit: () -> Unit,
     private val onPin: (Boolean) -> Unit,
+    private val tokens: net.ithandsfree.softphone.win.ui.Tokens,
+    private val mark: javax.swing.Icon?,
 ) {
     private var trayIcon: TrayIcon? = null
     private var lineItem: MenuItem? = null
@@ -203,13 +210,8 @@ internal class DeskSurfaces(
     private var noticeTimer: javax.swing.Timer? = null
     private val noticeBody = JLabel()
     private val noticeDialog = buildNotice()
-    private val incomingParty = JLabel("Incoming")
-    private val incomingLine = JLabel("")
-    private val miniParty = JLabel("")
-    private val miniClock = JLabel("")
-    private val miniMute = WelcomeButton("Mute", theme.raised, theme.ink, quiet = true, quietFill = theme.raised, line = theme.hairline, expand = false)
-    private val incomingDialog = buildIncoming()
-    private val miniDialog = buildMini()
+    private val incomingDialog = net.ithandsfree.softphone.win.ui.IncomingWindow(tokens, productName, mark, onAnswer, onDecline)
+    private val miniDialog = net.ithandsfree.softphone.win.ui.MiniCallWindow(tokens, productName, onMute, onHangup, onOpen)
 
     fun installTray(icon: Image?) {
         if (icon == null || !SystemTray.isSupported()) return
@@ -327,10 +329,30 @@ internal class DeskSurfaces(
         }
     }
 
-    fun sync(incoming: Boolean, onCall: Boolean, party: String, clock: String, extension: String, mainInFront: Boolean, muted: Boolean) {
-        miniMute.text = if (muted) "Unmute" else "Mute"
-        incomingParty.text = party.ifBlank { "Incoming call" }
-        incomingLine.text = if (extension.isBlank()) "Incoming" else "Incoming on $extension"
+    private var shownCard: net.ithandsfree.softphone.win.ui.CallCard? = null
+    private var previewUntil = 0L
+
+    /** Design review only (-Dihf.preview=incoming): shows the incoming window with [card], without ringing. */
+    fun previewIncoming(card: net.ithandsfree.softphone.win.ui.CallCard) {
+        previewUntil = System.currentTimeMillis() + 20_000
+        incomingDialog.show(card)
+        place(incomingDialog, top = false)
+        incomingDialog.isVisible = true
+    }
+
+    fun sync(
+        incoming: Boolean,
+        onCall: Boolean,
+        card: net.ithandsfree.softphone.win.ui.CallCard,
+        clock: String,
+        mainInFront: Boolean,
+        muted: Boolean,
+    ) {
+        if (!incoming && System.currentTimeMillis() < previewUntil) return
+        if (card != shownCard) {
+            shownCard = card
+            incomingDialog.show(card)
+        }
         if (incoming) {
             if (noticeDialog.isVisible) {
                 noticeTimer?.stop()
@@ -340,17 +362,17 @@ internal class DeskSurfaces(
                 place(incomingDialog, top = false)
                 incomingDialog.isVisible = true
                 incomingDialog.toFront()
-                incomingDialog.rootPane.defaultButton?.requestFocusInWindow()
+                incomingDialog.focusAnswer()
             }
-            if (WindowPrefs.dnd()) CallRinger.stop() else CallRinger.start()
+            // A waiting call beeps in the headset (voice engine); the ringtone would play over the conversation.
+            if (WindowPrefs.dnd() || card.waiting) CallRinger.stop() else CallRinger.start()
         } else if (incomingDialog.isVisible) {
             incomingDialog.isVisible = false
             CallRinger.stop()
         }
 
         val showMini = onCall && !incoming && !mainInFront
-        miniParty.text = party.ifBlank { "On a call" }
-        miniClock.text = clock
+        if (showMini) miniDialog.show(card, clock, muted)
         if (showMini) {
             if (!miniDialog.isVisible) {
                 place(miniDialog, top = true)
@@ -398,95 +420,7 @@ internal class DeskSurfaces(
         return dialog
     }
 
-    private fun buildIncoming(): JDialog {
-        val dialog = JDialog()
-        dialog.title = productName
-        dialog.isAlwaysOnTop = true
-        dialog.isModal = false
-        dialog.type = java.awt.Window.Type.UTILITY
-        dialog.defaultCloseOperation = WindowConstants.DO_NOTHING_ON_CLOSE
-        val panel = JPanel()
-        panel.layout = BoxLayout(panel, BoxLayout.Y_AXIS)
-        panel.background = theme.ground
-        panel.border = EmptyBorder(16, 16, 16, 16)
-        incomingLine.font = Font("Segoe UI", Font.PLAIN, UiScale.px(13))
-        incomingLine.foreground = theme.muted
-        incomingLine.alignmentX = JLabel.LEFT_ALIGNMENT
-        incomingParty.font = Font("Georgia", Font.PLAIN, UiScale.px(28))
-        incomingParty.foreground = theme.ink
-        incomingParty.alignmentX = JLabel.LEFT_ALIGNMENT
-        val answer = WelcomeButton("Answer", theme.gold, theme.goldInk, expand = false)
-        answer.addActionListener { onAnswer() }
-        val decline = WelcomeButton("Decline", theme.coral, theme.ground, expand = false)
-        decline.addActionListener { onDecline() }
-        val row = JPanel()
-        row.background = theme.ground
-        row.layout = BoxLayout(row, BoxLayout.X_AXIS)
-        row.alignmentX = JLabel.LEFT_ALIGNMENT
-        row.add(answer)
-        row.add(Box.createHorizontalStrut(8))
-        row.add(decline)
-        panel.add(incomingLine)
-        panel.add(Box.createVerticalStrut(6))
-        panel.add(incomingParty)
-        panel.add(Box.createVerticalStrut(16))
-        panel.add(row)
-        dialog.contentPane = panel
-        dialog.rootPane.defaultButton = answer
-        dialog.rootPane.getInputMap(javax.swing.JComponent.WHEN_IN_FOCUSED_WINDOW).put(
-            KeyStroke.getKeyStroke("ESCAPE"),
-            "decline-call",
-        )
-        dialog.rootPane.actionMap.put("decline-call", object : javax.swing.AbstractAction() {
-            override fun actionPerformed(event: java.awt.event.ActionEvent) = onDecline()
-        })
-        dialog.pack()
-        dialog.setSize(UiScale.px(380), dialog.height.coerceAtLeast(UiScale.px(180)))
-        return dialog
-    }
-
-    private fun buildMini(): JDialog {
-        val dialog = JDialog()
-        dialog.title = productName
-        dialog.isAlwaysOnTop = true
-        dialog.isModal = false
-        dialog.type = java.awt.Window.Type.UTILITY
-        dialog.defaultCloseOperation = WindowConstants.DO_NOTHING_ON_CLOSE
-        val panel = JPanel(BorderLayout(12, 0))
-        panel.background = theme.ground
-        panel.border = EmptyBorder(12, 14, 12, 14)
-        miniParty.font = Font("Segoe UI", Font.BOLD, UiScale.px(14))
-        miniParty.foreground = theme.ink
-        miniClock.font = Font("Consolas", Font.PLAIN, UiScale.px(13))
-        miniClock.foreground = theme.gold
-        val text = JPanel()
-        text.layout = BoxLayout(text, BoxLayout.Y_AXIS)
-        text.background = theme.ground
-        text.add(miniParty)
-        text.add(miniClock)
-        miniMute.addActionListener { onMute() }
-        val hang = WelcomeButton("Hang up", theme.coral, theme.ground, expand = false)
-        hang.addActionListener { onHangup() }
-        val open = WelcomeButton("Open", theme.raised, theme.ink, quiet = true, quietFill = theme.raised, line = theme.hairline, expand = false)
-        open.addActionListener { onOpen() }
-        val actions = JPanel()
-        actions.background = theme.ground
-        actions.layout = BoxLayout(actions, BoxLayout.X_AXIS)
-        actions.add(miniMute)
-        actions.add(Box.createHorizontalStrut(8))
-        actions.add(hang)
-        actions.add(Box.createHorizontalStrut(8))
-        actions.add(open)
-        panel.add(text, BorderLayout.CENTER)
-        panel.add(actions, BorderLayout.EAST)
-        dialog.contentPane = panel
-        dialog.pack()
-        dialog.setSize(UiScale.px(560), dialog.height.coerceAtLeast(UiScale.px(88)))
-        dialog.minimumSize = Dimension(UiScale.px(480), UiScale.px(80))
-        return dialog
-    }
-
-    private fun place(dialog: JDialog, top: Boolean) {
+    private fun place(dialog: java.awt.Window, top: Boolean) {
         val screen = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
         val x = screen.x + screen.width - dialog.width - 24
         val y = if (top) screen.y + 24 else screen.y + screen.height - dialog.height - 48

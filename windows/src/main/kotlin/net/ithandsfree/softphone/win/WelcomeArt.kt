@@ -210,7 +210,7 @@ class HeroBanner(
         g2.color = gold
         g2.font = italic
         g2.drawString(emphasis, left, emphasisBase)
-        feature(g2, left, first, "Two lines, one app", "Business and Personal, each with its own number.", true)
+        feature(g2, left, first, "Two lines, one app", "Each extension with its own number.", true)
         feature(g2, left, second, "Texts with photos", "Send and receive MMS from the line you choose.", false)
     }
 

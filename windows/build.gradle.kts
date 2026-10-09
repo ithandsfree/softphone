@@ -19,6 +19,11 @@ repositories {
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("net.java.dev.jna:jna:5.15.0")
+    implementation("net.java.dev.jna:jna-platform:5.15.0")
+    // Round-3 desktop design: custom title bar with Windows 11 snap layouts, rounded controls, SVG icons.
+    implementation("com.formdev:flatlaf:3.5.4")
+    implementation("com.formdev:flatlaf-extras:3.5.4")
+    implementation("com.github.weisj:jsvg:1.6.1")
     testImplementation(kotlin("test"))
 }
 
@@ -42,6 +47,8 @@ fun JavaExec.phoneRuntime() {
 tasks.named<JavaExec>("run") {
     phoneRuntime()
     systemProperty("ihf.flavor", phoneFlavor)
+    // Design review: gradlew run -Ppreview=incoming
+    (findProperty("preview") as String?)?.let { systemProperty("ihf.preview", it) }
 }
 
 tasks.register<JavaExec>("runCommunity") {

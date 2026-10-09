@@ -47,6 +47,42 @@ fun formatDialDigits(raw: String): String {
     }
 }
 
+/**
+ * A finished number as people read it (`desktop-*.png`): a NANP number with or without the leading 1 shows as
+ * `(416) 555-0177`; extensions, feature codes and other numbers stay as they are.
+ */
+fun displayNumber(raw: String): String {
+    val value = raw.trim()
+    val digits = value.removePrefix("+")
+    if (digits.isEmpty() || digits.any { !it.isDigit() }) return value
+    val local = if (digits.length == 11 && digits.startsWith("1")) digits.drop(1) else digits
+    return if (local.length == 10) "(${local.take(3)}) ${local.substring(3, 6)}-${local.substring(6)}" else value
+}
+
+/** Epoch milliseconds from a BFF time (Unix seconds, or already milliseconds). Null when it is not a number. */
+fun epochMsOf(raw: String?): Long? {
+    val value = raw?.trim()?.toLongOrNull() ?: return null
+    if (value <= 0) return null
+    return if (value < 100_000_000_000L) value * 1000 else value
+}
+
+/** Same number regardless of formatting or the NANP leading 1, for matching a contact or a thread. */
+fun sameNumber(a: String, b: String): Boolean {
+    fun key(v: String) = v.filter { it.isDigit() }.let { if (it.length == 11 && it.startsWith("1")) it.drop(1) else it }
+    val ka = key(a)
+    return ka.isNotEmpty() && ka == key(b)
+}
+
+/**
+ * The PBX call that matches a call this PC logged: same number, and the PBX start + duration within
+ * [slackMs] of the local end time (the PC stores when the call ended). Null when none is close enough.
+ */
+fun matchPbxCall(party: String, endedAtMs: Long, seconds: Int, calls: List<PbxCall>, slackMs: Long = 120_000): PbxCall? =
+    calls.filter { sameNumber(it.peer, party) || (it.peer == party && party.isNotBlank()) }
+        .map { it to kotlin.math.abs((it.at * 1000 + it.duration * 1000L) - endedAtMs) }
+        .filter { it.second <= slackMs + seconds * 1000L }
+        .minByOrNull { it.second }?.first
+
 /** Largest type while the entry is a normal number, then step down so a long paste still fits. */
 fun dialTypeSize(raw: String): Int {
     val digits = raw.filter { it.isDigit() || it == '*' || it == '#' || it == '+' }
@@ -106,6 +142,8 @@ internal fun recentCanCall(party: String): Boolean {
     if (value.equals("anonymous", ignoreCase = true)) return false
     if (value.equals("unknown", ignoreCase = true)) return false
     if (value.contains("withheld", ignoreCase = true)) return false
+    // Voicemail and CDR caller IDs for a blocked number.
+    if (value.lowercase() in setOf("unavailable", "restricted", "private", "anonymous caller")) return false
     return true
 }
 
@@ -161,3 +199,37 @@ fun normalizeEnrolToken(raw: String?): String {
 
 fun looksLikeEnrolToken(token: String): Boolean =
     token.length >= 40 && token.all { it.isLetterOrDigit() }
+
+/** Voicemail row time: "4:52 PM" today, "Yesterday 4:52 PM", "Mon 9:12 AM" this week, then "Sep 26". */
+internal fun formatVoicemailWhen(epochMs: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault(), today: java.time.LocalDate = java.time.LocalDate.now(zone)): String {
+    if (epochMs <= 0) return ""
+    val at = java.time.Instant.ofEpochMilli(epochMs).atZone(zone)
+    val clock = at.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US))
+    val day = at.toLocalDate()
+    return when {
+        day == today -> clock
+        day == today.minusDays(1) -> "Yesterday $clock"
+        day.isAfter(today.minusDays(7)) -> at.format(java.time.format.DateTimeFormatter.ofPattern("EEE", java.util.Locale.US)) + " $clock"
+        day.year == today.year -> at.format(java.time.format.DateTimeFormatter.ofPattern("MMM d", java.util.Locale.US))
+        else -> at.format(java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy", java.util.Locale.US))
+    }
+}
+
+/** Seconds as "0:41" / "12:05". */
+internal fun formatSeconds(seconds: Int): String {
+    val s = seconds.coerceAtLeast(0)
+    return "${s / 60}:${(s % 60).toString().padStart(2, '0')}"
+}
+
+/**
+ * A caller name worth showing, or null. FreePBX trunks often store "CID:<number>" or the number itself as the caller
+ * name (voicemail .txt, CDR); those read as noise, so the number is shown instead.
+ */
+internal fun callerName(raw: String): String? {
+    val name = raw.trim().trim('"')
+    if (name.isBlank()) return null
+    if (name.startsWith("CID:", ignoreCase = true)) return null
+    if (name.all { it.isDigit() || it == '+' || it == ' ' || it == '-' }) return null
+    if (name.equals("unknown", true) || name.equals("unavailable", true) || name.equals("anonymous", true)) return null
+    return name
+}

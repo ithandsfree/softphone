@@ -37,6 +37,17 @@ object SipBridge {
         val extensionA: String = "",
         val extensionB: String = "",
         val callExtension: String = "",
+        /** Last blind transfer: SIP status from the PBX NOTIFY (0 = none yet). Added 0.1.35. */
+        val transferCode: Int = 0,
+        val transferFinal: Boolean = false,
+        val transferText: String = "",
+        /** Native id of the current call (-1 none). Added 0.1.39 for per-call tracking. */
+        val callId: Int = -1,
+        /** Call waiting (0.1.39): 0 none, 1 a second call rings, 2 the other call is on hold. */
+        val waitingState: Int = 0,
+        val waitingId: Int = -1,
+        val waitingRemote: String = "",
+        val waitingExtension: String = "",
     )
 
     data class AudioDevice(
@@ -106,6 +117,14 @@ object SipBridge {
             extensionA = cString(raw.extA),
             extensionB = cString(raw.extB),
             callExtension = cString(raw.callExt),
+            transferCode = raw.xferCode,
+            transferFinal = raw.xferFinal != 0,
+            transferText = cString(raw.xferText),
+            callId = raw.callId,
+            waitingState = raw.waitingState,
+            waitingId = if (raw.waitingState == 0) -1 else raw.waitingId,
+            waitingRemote = cString(raw.waitingRemote),
+            waitingExtension = cString(raw.waitingExt),
         )
     }
 
@@ -166,6 +185,36 @@ object SipBridge {
     } catch (_: Throwable) {
         -1
     }
+
+    /** Echo cancellation (with Speex noise suppression and gain control) on or off, live. */
+    fun setEchoCancel(enabled: Boolean): Int = try {
+        native?.ihf_sip_set_ec(if (enabled) 1 else 0) ?: -1
+    } catch (_: Throwable) {
+        -1
+    }
+
+    /** Level (0–255) of the other person's audio on the call, or -1. */
+    fun rxLevel(): Int = try {
+        native?.ihf_sip_rx_level() ?: -1
+    } catch (_: Throwable) {
+        -1
+    }
+
+    /** Call volume in percent (100 = as received). */
+    fun setCallVolume(percent: Int): Int = try {
+        native?.ihf_sip_set_rx_gain(percent) ?: -1
+    } catch (_: Throwable) {
+        -1
+    }
+
+    /** Call waiting (0.1.39). Each returns -1 on an older DLL. */
+    fun setCallWaiting(enabled: Boolean): Int = try { native?.ihf_sip_set_call_waiting(if (enabled) 1 else 0) ?: -1 } catch (_: Throwable) { -1 }
+
+    fun waitingAnswer(): Int = try { native?.ihf_sip_waiting_answer() ?: -1 } catch (_: Throwable) { -1 }
+
+    fun waitingEnd(): Int = try { native?.ihf_sip_waiting_end() ?: -1 } catch (_: Throwable) { -1 }
+
+    fun swapCalls(): Int = try { native?.ihf_sip_swap() ?: -1 } catch (_: Throwable) { -1 }
 
     fun ringStop(): Int = try {
         native?.ihf_sip_ring_stop() ?: -1
@@ -238,7 +287,7 @@ object SipBridge {
 
     fun pollLog(): String? {
         val lib = native ?: return null
-        val buf = ByteArray(240)
+        val buf = ByteArray(640)
         val n = lib.ihf_sip_poll_log(buf, buf.size)
         if (n <= 0) return null
         return cString(buf).ifBlank { null }
@@ -282,6 +331,19 @@ object SipBridge {
         fun ihf_sip_dtmf(digits: String): Int
         fun ihf_sip_ring_start(wavPath: String): Int
         fun ihf_sip_ring_stop(): Int
+
+        /** Added 0.1.33. Older DLLs lack it; callers catch UnsatisfiedLinkError. */
+        fun ihf_sip_set_ec(enabled: Int): Int
+
+        /** Added 0.1.35. */
+        fun ihf_sip_rx_level(): Int
+        fun ihf_sip_set_rx_gain(percent: Int): Int
+
+        /** Added 0.1.39 (call waiting). */
+        fun ihf_sip_set_call_waiting(enabled: Int): Int
+        fun ihf_sip_waiting_answer(): Int
+        fun ihf_sip_waiting_end(): Int
+        fun ihf_sip_swap(): Int
     }
 
     class IhfAudDev : Structure() {
@@ -319,6 +381,13 @@ object SipBridge {
         @JvmField var extA: ByteArray = ByteArray(32)
         @JvmField var extB: ByteArray = ByteArray(32)
         @JvmField var callExt: ByteArray = ByteArray(32)
+        @JvmField var xferCode: Int = 0
+        @JvmField var xferFinal: Int = 0
+        @JvmField var xferText: ByteArray = ByteArray(96)
+        @JvmField var waitingState: Int = 0
+        @JvmField var waitingId: Int = -1
+        @JvmField var waitingRemote: ByteArray = ByteArray(256)
+        @JvmField var waitingExt: ByteArray = ByteArray(32)
 
         override fun getFieldOrder(): List<String> = listOf(
             "started",
@@ -346,6 +415,13 @@ object SipBridge {
             "extA",
             "extB",
             "callExt",
+            "xferCode",
+            "xferFinal",
+            "xferText",
+            "waitingState",
+            "waitingId",
+            "waitingRemote",
+            "waitingExt",
         )
     }
 }

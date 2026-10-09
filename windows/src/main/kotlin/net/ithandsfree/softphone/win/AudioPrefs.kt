@@ -21,6 +21,20 @@ internal object AudioPrefs {
         return if (ringtoneFile() != null && saved.isBlank()) RingtoneLibrary.CUSTOM else RingtoneLibrary.DEFAULT
     }
 
+    /** Built-in tone chosen for one line, or null for "same as default". */
+    fun lineRingtone(extension: String): String? =
+        load().getProperty("ringtone.$extension")?.takeIf { id -> RingtoneLibrary.builtIn.any { it.id == id } }
+
+    fun saveLineRingtone(extension: String, id: String?) {
+        val props = load()
+        if (id.isNullOrBlank()) props.remove("ringtone.$extension") else props.setProperty("ringtone.$extension", id)
+        store(props)
+    }
+
+    /** Tone for a call on [extension]: that line's choice, else the default from Settings. */
+    fun ringtoneStyleFor(extension: String?): String =
+        extension?.let { lineRingtone(it) } ?: ringtoneStyle()
+
     fun ringtoneFile(): File? {
         val path = load().getProperty("ringtone").orEmpty()
         if (path.isBlank()) return null
@@ -45,6 +59,24 @@ internal object AudioPrefs {
     fun saveAlsoRing(enabled: Boolean) {
         val props = load()
         props.setProperty("alsoRing", if (enabled) "true" else "false")
+        store(props)
+    }
+
+    /** Echo cancellation with its noise suppression and gain control (Speex AEC). On unless turned off. */
+    fun voiceProcessing(): Boolean = load().getProperty("voiceProcessing") != "false"
+
+    /** Call volume in percent: 100 plays the other person as received; up to 300 boosts a quiet line. */
+    fun callVolume(): Int = load().getProperty("callVolume")?.toIntOrNull()?.coerceIn(50, 300) ?: 100
+
+    fun saveCallVolume(percent: Int) {
+        val props = load()
+        props.setProperty("callVolume", percent.coerceIn(50, 300).toString())
+        store(props)
+    }
+
+    fun saveVoiceProcessing(enabled: Boolean) {
+        val props = load()
+        props.setProperty("voiceProcessing", if (enabled) "true" else "false")
         store(props)
     }
 

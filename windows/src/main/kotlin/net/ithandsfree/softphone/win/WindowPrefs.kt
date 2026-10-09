@@ -20,6 +20,15 @@ internal object WindowPrefs {
 
     fun dnd(): Boolean = load().getProperty("dnd") == "true"
 
+    /** Call waiting (0.1.39): a second call rings beside the current one. On unless turned off. */
+    fun callWaiting(): Boolean = load().getProperty("callWaiting") != "false"
+
+    fun saveCallWaiting(enabled: Boolean) {
+        val props = load()
+        props.setProperty("callWaiting", if (enabled) "true" else "false")
+        store(props)
+    }
+
     fun saveBounds(x: Int, y: Int, width: Int, height: Int) {
         val props = load()
         props.setProperty("x", x.toString())
