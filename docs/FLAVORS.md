@@ -33,3 +33,7 @@ cd android
 Play Store listings are separate (different application ids). Closed testing comes before any paid listing. See [PLAY.md](PLAY.md).
 
 The `ihf` flavor shows Settings → Privacy (`https://ithandsfree.com/privacy#ihf-phone`). The `community` flavor hides that row until it has its own privacy policy. Both flavors ship the GPL-2.0 text under Settings → Licences and link to this repository. The privacy URL is a Play requirement. It is not the GPL source link.
+
+## Windows
+
+`windows/` uses the same split. `gradlew run` is IHF Phone (server fields hidden, placeholder host in this tree). `gradlew runCommunity` is Community Softphone (empty server until the BFF URL and SIP domain are entered). Both talk to the BFF, so a Windows phone and an Android phone on one PBX can call and text.
