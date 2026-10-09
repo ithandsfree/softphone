@@ -13,9 +13,11 @@
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia/audiodev.h>
 #include <pjmedia/null_port.h>
+#include <pjmedia/tonegen.h>
 
-#define LOG_SLOTS 48
-#define LOG_LEN 200
+/* 0.1.35: room for whole SIP header lines; the app drains this into its diagnostic log file. */
+#define LOG_SLOTS 512
+#define LOG_LEN 600
 
 static CRITICAL_SECTION g_cs;
 static CRITICAL_SECTION g_log_cs;
@@ -42,6 +44,15 @@ static int g_playback = -1000;
 static int g_muted;
 static int g_held;
 static int g_consult = -1;
+/* 0.1.39 call waiting: the second call, ringing (waiting_state 1) or answered and now on hold (2). */
+static int g_wait = -1;
+static int g_cw_enabled = 1;
+static pj_pool_t *g_cw_pool;
+static pjmedia_port *g_cw_port;
+static pjsua_conf_port_id g_cw_slot = PJSUA_INVALID_ID;
+static void cw_beep(int on);
+static void line_ext_for_acc(pjsua_acc_id acc, char *out, size_t n);
+static float g_rx_gain = 1.0f;
 static pjsua_player_id g_ring = PJSUA_INVALID_ID;
 static pj_pool_t *g_meter_pool;
 static pjmedia_port *g_meter_port;
@@ -75,7 +86,11 @@ static void copy_pj(char *dst, size_t n, const pj_str_t *src) {
 
 static void push_log(const char *line) {
     if (!line || !line[0]) return;
-    if (strstr(line, "Authorization") || strstr(line, "password=")) return;
+    if (strstr(line, "password=")) return;
+    /* Digest credentials never reach the log; the header name stays so a 401/407 round is still visible. */
+    if (strstr(line, "Authorization:") || strstr(line, "authorization:")) {
+        line = strstr(line, "Proxy-") ? "Proxy-Authorization: [removed]" : "Authorization: [removed]";
+    }
     EnterCriticalSection(&g_log_cs);
     copy_str(g_logs[g_log_write], LOG_LEN, line);
     g_log_write = (g_log_write + 1) % LOG_SLOTS;
@@ -99,16 +114,26 @@ static void set_pj_error(const char *what, pj_status_t status) {
     set_error(line);
 }
 
+/* A PJSIP log entry can be a whole SIP message: push it one line at a time so each header is kept (and redacted). */
 static void on_log(int level, const char *data, int len) {
     char line[LOG_LEN];
-    int n = len;
+    int start = 0;
+    int i;
     (void)level;
-    if (!data || n <= 0) return;
-    if (n >= LOG_LEN) n = LOG_LEN - 1;
-    memcpy(line, data, (size_t)n);
-    line[n] = 0;
-    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-    push_log(line);
+    if (!data || len <= 0) return;
+    for (i = 0; i <= len; ++i) {
+        if (i == len || data[i] == '\n') {
+            int n = i - start;
+            if (n >= LOG_LEN) n = LOG_LEN - 1;
+            if (n > 0) {
+                memcpy(line, data + start, (size_t)n);
+                line[n] = 0;
+                while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
+                if (n > 0) push_log(line);
+            }
+            start = i + 1;
+        }
+    }
 }
 
 /* The bridge only measures a port that has a listener. A silent port keeps the mic level moving without playing it back. */
@@ -183,12 +208,26 @@ static void on_incoming_call(pjsua_acc_id acc, pjsua_call_id call_id, pjsip_rx_d
     EnterCriticalSection(&g_cs);
     busy = g_st.call_active;
     LeaveCriticalSection(&g_cs);
+    if (pjsua_call_get_info(call_id, &ci) == PJ_SUCCESS) copy_pj(remote, sizeof remote, &ci.remote_info);
+    if (busy && g_cw_enabled && g_wait < 0 && g_consult < 0) {
+        /* Call waiting: keep it ringing (180) beside the current call; the app offers Hold & answer / Decline. */
+        pjsua_call_answer(call_id, 180, NULL, NULL);
+        EnterCriticalSection(&g_cs);
+        g_wait = (int)call_id;
+        g_st.waiting_state = 1;
+        g_st.waiting_id = (int)call_id;
+        copy_str(g_st.waiting_remote, sizeof g_st.waiting_remote, remote);
+        line_ext_for_acc(acc, g_st.waiting_ext, sizeof g_st.waiting_ext);
+        LeaveCriticalSection(&g_cs);
+        cw_beep(1);
+        push_log("call waiting");
+        return;
+    }
     if (busy || g_consult >= 0) {
         pjsua_call_answer(call_id, 486, NULL, NULL);
         push_log("second call rejected");
         return;
     }
-    if (pjsua_call_get_info(call_id, &ci) == PJ_SUCCESS) copy_pj(remote, sizeof remote, &ci.remote_info);
     /* 180 keeps the INVITE up while the window waits. Answer sends 200. */
     pjsua_call_answer(call_id, 180, NULL, NULL);
     EnterCriticalSection(&g_cs);
@@ -215,8 +254,19 @@ static void on_call_media_state(pjsua_call_id call_id) {
         }
         pjsua_conf_connect(ci.media[i].stream.aud.conf_slot, 0);
         pjsua_conf_connect(0, ci.media[i].stream.aud.conf_slot);
+        /* Call volume (Settings): boosts what the other person says before it reaches the speaker. */
+        pjsua_conf_adjust_rx_level(ci.media[i].stream.aud.conf_slot, g_rx_gain);
     }
-    if (g_muted) pjsua_conf_adjust_tx_level(0, 0.0f);
+    {
+        int cap = 0, play = 0;
+        char line[160];
+        if (pjsua_get_snd_dev(&cap, &play) == PJ_SUCCESS) {
+            snprintf(line, sizeof line, "media up: call %d capture %d playback %d volume %d%%",
+                     (int)call_id, cap, play, (int)(g_rx_gain * 100.0f + 0.5f));
+            push_log(line);
+        }
+    }
+    if (g_muted) pjsua_conf_adjust_rx_level(0, 0.0f);
 }
 
 static void clear_consult_locked(void) {
@@ -225,6 +275,51 @@ static void clear_consult_locked(void) {
     g_st.consult_id = -1;
     g_st.consult_state[0] = 0;
     g_st.consult_remote[0] = 0;
+}
+
+static void clear_waiting_locked(void) {
+    g_wait = -1;
+    g_st.waiting_state = 0;
+    g_st.waiting_id = -1;
+    g_st.waiting_remote[0] = 0;
+    g_st.waiting_ext[0] = 0;
+}
+
+/* Call-waiting beep into the headset only (never into the call): two short 440 Hz tones every ~4.5 s. */
+static void cw_beep(int on) {
+    if (!g_started) return;
+    if (on) {
+        pjmedia_tone_desc tones[2];
+        if (g_cw_slot == PJSUA_INVALID_ID) {
+            pjsua_conf_port_info info;
+            if (pjsua_conf_get_port_info(0, &info) != PJ_SUCCESS) return;
+            g_cw_pool = pjsua_pool_create("ihf-cw", 512, 512);
+            if (!g_cw_pool) return;
+            if (pjmedia_tonegen_create(g_cw_pool, info.clock_rate, info.channel_count, info.samples_per_frame,
+                                       16, 0, &g_cw_port) != PJ_SUCCESS) return;
+            if (pjsua_conf_add_port(g_cw_pool, g_cw_port, &g_cw_slot) != PJ_SUCCESS) {
+                g_cw_slot = PJSUA_INVALID_ID;
+                return;
+            }
+        }
+        pj_bzero(tones, sizeof tones);
+        tones[0].freq1 = 440;
+        tones[0].on_msec = 220;
+        tones[0].off_msec = 160;
+        tones[1].freq1 = 440;
+        tones[1].on_msec = 220;
+        tones[1].off_msec = 4000;
+        pjmedia_tonegen_play(g_cw_port, 2, tones, PJMEDIA_TONEGEN_LOOP);
+        pjsua_conf_connect(g_cw_slot, 0);
+    } else if (g_cw_slot != PJSUA_INVALID_ID) {
+        pjmedia_tonegen_stop(g_cw_port);
+        pjsua_conf_disconnect(g_cw_slot, 0);
+    }
+}
+
+static void line_ext_for_acc(pjsua_acc_id acc, char *out, size_t n) {
+    if (acc == g_lines[1]) copy_str(out, n, g_users[1]);
+    else copy_str(out, n, g_users[0]);
 }
 
 static void clear_call(void) {
@@ -255,14 +350,61 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
         LeaveCriticalSection(&g_cs);
         return;
     }
+    if ((int)call_id == g_wait) {
+        /* The second call (ringing, or the call on hold) ended: back to one call. */
+        int was_ringing = g_st.waiting_state == 1;
+        if (ci.state == PJSIP_INV_STATE_DISCONNECTED) clear_waiting_locked();
+        LeaveCriticalSection(&g_cs);
+        if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
+            char why[160];
+            if (was_ringing) cw_beep(0);
+            snprintf(why, sizeof why, "%s call %d ended: %d %.*s", was_ringing ? "waiting" : "held", (int)call_id,
+                     ci.last_status, (int)ci.last_status_text.slen, ci.last_status_text.ptr ? ci.last_status_text.ptr : "");
+            push_log(why);
+        }
+        return;
+    }
     if (g_st.call_id < 0 || g_st.call_id == (int)call_id) {
         copy_str(g_st.call_state, sizeof g_st.call_state, state);
         if (remote[0]) copy_str(g_st.remote, sizeof g_st.remote, remote);
         if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
             int other = g_consult;
+            static char dump[6000];
+            char why[160];
+            int promoted = 0;
+            int promoted_ringing = 0;
             clear_call();
             clear_consult_locked();
+            g_st.muted = 0;
+            if (g_wait >= 0) {
+                /* Two calls were up: the other one becomes the current call. A ringing second call turns into a
+                   normal incoming call (the app rings for it); the call on hold stays on hold until Resume. */
+                promoted = g_wait;
+                promoted_ringing = g_st.waiting_state == 1;
+                g_st.call_id = g_wait;
+                g_st.call_active = 1;
+                g_st.incoming = promoted_ringing;
+                copy_str(g_st.remote, sizeof g_st.remote, g_st.waiting_remote);
+                copy_str(g_st.call_ext, sizeof g_st.call_ext, g_st.waiting_ext);
+                copy_str(g_st.call_state, sizeof g_st.call_state, promoted_ringing ? "Incoming" : "CONFIRMED");
+                g_st.held = promoted_ringing ? 0 : 1;
+                g_held = g_st.held;
+                clear_waiting_locked();
+            } else {
+                promoted = -1;
+            }
             LeaveCriticalSection(&g_cs);
+            if (promoted >= 0 && promoted_ringing) cw_beep(0);
+            /* A call never starts muted because the last one ended muted. */
+            if (g_muted) {
+                g_muted = 0;
+                pjsua_conf_adjust_rx_level(0, 1.0f);
+            }
+            snprintf(why, sizeof why, "call %d ended: %d %.*s", (int)call_id, ci.last_status,
+                     (int)ci.last_status_text.slen, ci.last_status_text.ptr ? ci.last_status_text.ptr : "");
+            push_log(why);
+            /* Jitter, loss and codec for the diagnostic log (no audio content). */
+            if (pjsua_call_dump(call_id, PJ_TRUE, dump, sizeof dump, "  ") == PJ_SUCCESS) on_log(4, dump, (int)strlen(dump));
             if (other >= 0) pjsua_call_hangup(other, 0, NULL, NULL);
             return;
         }
@@ -272,6 +414,29 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
     }
     LeaveCriticalSection(&g_cs);
     push_log(state);
+}
+
+/* NOTIFY progress for a blind transfer (REFER). The PBX ends our leg itself after a 2xx. */
+static void on_call_transfer_status(pjsua_call_id call_id, int st_code, const pj_str_t *st_text,
+                                    pj_bool_t final, pj_bool_t *p_cont) {
+    char text[96];
+    char line[200];
+    (void)p_cont;
+    copy_pj(text, sizeof text, st_text);
+    EnterCriticalSection(&g_cs);
+    g_st.xfer_code = st_code;
+    g_st.xfer_final = final ? 1 : 0;
+    copy_str(g_st.xfer_text, sizeof g_st.xfer_text, text);
+    LeaveCriticalSection(&g_cs);
+    snprintf(line, sizeof line, "transfer from call %d: %d %s%s", (int)call_id, st_code, text, final ? " (final)" : "");
+    push_log(line);
+    /* RFC 5589: after a final 2xx NOTIFY the transferor ends its own dialog. Asterisk does not always send BYE
+       (seen 2026-10-08 on a call-waiting call), which left the transferred call showing as active. */
+    if (final && st_code / 100 == 2) {
+        if (p_cont) *p_cont = PJ_FALSE;
+        pjsua_call_hangup(call_id, 0, NULL, NULL);
+        push_log("transfer complete; our leg hung up");
+    }
 }
 
 static int create_transport(pjsip_transport_type_e type, const char *ca_file, pjsua_transport_id *out) {
@@ -322,6 +487,7 @@ int ihf_sip_start(const char *user_agent, const char *ca_file) {
     cfg.cb.on_call_state = &on_call_state;
     cfg.cb.on_call_media_state = &on_call_media_state;
     cfg.cb.on_reg_state2 = &on_reg_state2;
+    cfg.cb.on_call_transfer_status = &on_call_transfer_status;
     if (user_agent && user_agent[0]) {
         copy_str(g_ua, sizeof g_ua, user_agent);
         cfg.user_agent = pj_str(g_ua);
@@ -413,6 +579,10 @@ void ihf_sip_stop(void) {
     g_capture = -1000;
     g_playback = -1000;
     g_meter_slot = PJSUA_INVALID_ID;
+    g_cw_slot = PJSUA_INVALID_ID;
+    g_cw_pool = NULL;
+    g_cw_port = NULL;
+    g_wait = -1;
     g_meter_pool = NULL;
     g_meter_port = NULL;
     g_lines[0] = PJSUA_INVALID_ID;
@@ -710,7 +880,7 @@ int ihf_sip_open_devices(int capture, int playback) {
     EnterCriticalSection(&g_cs);
     g_st.null_audio = 0;
     LeaveCriticalSection(&g_cs);
-    if (g_muted) pjsua_conf_adjust_tx_level(0, 0.0f);
+    if (g_muted) pjsua_conf_adjust_rx_level(0, 0.0f);
     attach_mic_meter();
     return 0;
 }
@@ -748,14 +918,14 @@ static int switch_snd(int capture, int playback) {
             pjsua_set_snd_dev(old_capture, old_playback) == PJ_SUCCESS) {
             g_capture = old_capture;
             g_playback = old_playback;
-            if (g_muted) pjsua_conf_adjust_tx_level(0, 0.0f);
+            if (g_muted) pjsua_conf_adjust_rx_level(0, 0.0f);
             attach_mic_meter();
         }
         return -1;
     }
     g_capture = capture;
     g_playback = playback;
-    if (g_muted) pjsua_conf_adjust_tx_level(0, 0.0f);
+    if (g_muted) pjsua_conf_adjust_rx_level(0, 0.0f);
     attach_mic_meter();
     return 0;
 }
@@ -821,7 +991,9 @@ int ihf_sip_set_mute(int muted) {
         return 0;
     }
     LeaveCriticalSection(&g_cs);
-    if (pjsua_conf_adjust_tx_level(0, g_muted ? 0.0f : 1.0f) != PJ_SUCCESS) {
+    /* Slot 0 is the sound device: its rx level is the microphone going into the call, its tx level is what the
+       speaker or headset plays. Mute silences only the microphone (0.1.35 muted tx, which also silenced the caller). */
+    if (pjsua_conf_adjust_rx_level(0, g_muted ? 0.0f : 1.0f) != PJ_SUCCESS) {
         set_error("Mute was not applied");
         return -1;
     }
@@ -887,6 +1059,11 @@ int ihf_sip_transfer(const char *uri) {
     }
     dest.ptr = (char *)uri;
     dest.slen = (pj_ssize_t)strlen(uri);
+    EnterCriticalSection(&g_cs);
+    g_st.xfer_code = 0;
+    g_st.xfer_final = 0;
+    g_st.xfer_text[0] = 0;
+    LeaveCriticalSection(&g_cs);
     status = pjsua_call_xfer(call_id, &dest, NULL);
     if (status != PJ_SUCCESS) {
         set_pj_error("transfer", status);
@@ -909,10 +1086,20 @@ int ihf_sip_consult(const char *uri) {
         set_error("Already speaking to someone else");
         return -1;
     }
+    if (g_wait >= 0) {
+        set_error("End the other call first");
+        return -1;
+    }
     if (!g_held && ihf_sip_hold() != 0) return -1;
     copy_str(buf, sizeof buf, uri);
     dst = pj_str(buf);
-    status = pjsua_call_make_call(g_acc, &dst, 0, NULL, NULL, &call_id);
+    {
+        /* Consult from the line the call is on, not the line chosen for new calls. */
+        pjsua_call_info pci;
+        pjsua_acc_id acc = g_acc;
+        if (pjsua_call_get_info(primary, &pci) == PJ_SUCCESS && pjsua_acc_is_valid(pci.acc_id)) acc = pci.acc_id;
+        status = pjsua_call_make_call(acc, &dst, 0, NULL, NULL, &call_id);
+    }
     if (status != PJ_SUCCESS) {
         set_pj_error("consult", status);
         return -1;
@@ -965,5 +1152,172 @@ int ihf_sip_dtmf(const char *digits) {
         set_pj_error("dtmf", status);
         return -1;
     }
+    return 0;
+}
+
+int ihf_sip_set_ec(int enabled) {
+    pj_status_t status;
+    if (!g_started) return -1;
+    ensure_thread();
+    status = pjsua_set_ec(enabled ? PJSUA_DEFAULT_EC_TAIL_LEN : 0, 0);
+    if (status != PJ_SUCCESS) {
+        set_pj_error("echo canceller", status);
+        return -1;
+    }
+    push_log(enabled ? "echo canceller on" : "echo canceller off");
+    return 0;
+}
+
+/* Level of the other person's audio on the current call: tells "the caller is quiet" from "this PC plays quietly". */
+int ihf_sip_rx_level(void) {
+    unsigned tx = 0, rx = 0;
+    int call_id = active_call();
+    pjsua_conf_port_id slot;
+    if (call_id < 0) return -1;
+    slot = pjsua_call_get_conf_port(call_id);
+    if (slot == PJSUA_INVALID_ID) return -1;
+    if (pjsua_conf_get_signal_level(slot, &tx, &rx) != PJ_SUCCESS) return -1;
+    return (int)rx;
+}
+
+int ihf_sip_set_rx_gain(int percent) {
+    int call_id;
+    pjsua_conf_port_id slot;
+    char line[80];
+    if (percent < 50) percent = 50;
+    if (percent > 400) percent = 400;
+    g_rx_gain = (float)percent / 100.0f;
+    snprintf(line, sizeof line, "call volume %d%%", percent);
+    push_log(line);
+    call_id = active_call();
+    if (call_id < 0) return 0;
+    slot = pjsua_call_get_conf_port(call_id);
+    if (slot != PJSUA_INVALID_ID) pjsua_conf_adjust_rx_level(slot, g_rx_gain);
+    if (g_consult >= 0) {
+        slot = pjsua_call_get_conf_port(g_consult);
+        if (slot != PJSUA_INVALID_ID) pjsua_conf_adjust_rx_level(slot, g_rx_gain);
+    }
+    return 0;
+}
+
+/* ---- 0.1.39 call waiting ------------------------------------------------------------------------------------- */
+
+int ihf_sip_set_call_waiting(int enabled) {
+    g_cw_enabled = enabled ? 1 : 0;
+    push_log(enabled ? "call waiting on" : "call waiting off");
+    return 0;
+}
+
+/* The two calls trade places in the status: [now] becomes the current call, [other] the call on hold. */
+static void swap_roles_locked(int now, int other, const char *now_state) {
+    char remote[256];
+    char ext[32];
+    copy_str(remote, sizeof remote, g_st.remote);
+    copy_str(ext, sizeof ext, g_st.call_ext);
+    g_st.call_id = now;
+    g_st.call_active = 1;
+    g_st.incoming = 0;
+    copy_str(g_st.remote, sizeof g_st.remote, g_st.waiting_remote);
+    copy_str(g_st.call_ext, sizeof g_st.call_ext, g_st.waiting_ext);
+    copy_str(g_st.call_state, sizeof g_st.call_state, now_state);
+    g_st.held = 0;
+    g_held = 0;
+    g_wait = other;
+    g_st.waiting_state = 2;
+    g_st.waiting_id = other;
+    copy_str(g_st.waiting_remote, sizeof g_st.waiting_remote, remote);
+    copy_str(g_st.waiting_ext, sizeof g_st.waiting_ext, ext);
+}
+
+int ihf_sip_waiting_answer(void) {
+    int current;
+    int waiting;
+    pj_status_t status;
+    if (!g_started) return -1;
+    ensure_thread();
+    EnterCriticalSection(&g_cs);
+    current = g_st.call_id;
+    waiting = g_st.waiting_state == 1 ? g_wait : -1;
+    LeaveCriticalSection(&g_cs);
+    if (waiting < 0) {
+        set_error("No call waiting");
+        return -1;
+    }
+    if (current >= 0 && !g_held) {
+        status = pjsua_call_set_hold(current, NULL);
+        if (status != PJ_SUCCESS) {
+            set_pj_error("hold before answer", status);
+            return -1;
+        }
+    }
+    cw_beep(0);
+    /* Swap first, so the CONFIRMED callback for the answered call already finds it as the current call. */
+    EnterCriticalSection(&g_cs);
+    swap_roles_locked(waiting, current, "Connected");
+    LeaveCriticalSection(&g_cs);
+    status = pjsua_call_answer(waiting, 200, NULL, NULL);
+    if (status != PJ_SUCCESS) {
+        set_pj_error("answer waiting call", status);
+        pjsua_call_hangup(waiting, 0, NULL, NULL);
+        return -1;
+    }
+    push_log("call waiting answered; first call on hold");
+    return 0;
+}
+
+int ihf_sip_waiting_end(void) {
+    int waiting;
+    int ringing;
+    pj_status_t status;
+    if (!g_started) return -1;
+    ensure_thread();
+    EnterCriticalSection(&g_cs);
+    waiting = g_wait;
+    ringing = g_st.waiting_state == 1;
+    LeaveCriticalSection(&g_cs);
+    if (waiting < 0) {
+        set_error("No other call");
+        return -1;
+    }
+    if (ringing) cw_beep(0);
+    /* 486 lets the PBX carry on as for a busy line (other devices, then voicemail). */
+    status = pjsua_call_hangup(waiting, ringing ? 486 : 0, NULL, NULL);
+    if (status != PJ_SUCCESS) {
+        set_pj_error(ringing ? "decline waiting call" : "end call on hold", status);
+        return -1;
+    }
+    return 0;
+}
+
+int ihf_sip_swap(void) {
+    int current;
+    int other;
+    pj_status_t status;
+    if (!g_started) return -1;
+    ensure_thread();
+    EnterCriticalSection(&g_cs);
+    current = g_st.call_id;
+    other = g_st.waiting_state == 2 ? g_wait : -1;
+    LeaveCriticalSection(&g_cs);
+    if (other < 0) {
+        set_error("No call on hold");
+        return -1;
+    }
+    if (current >= 0 && !g_held) {
+        status = pjsua_call_set_hold(current, NULL);
+        if (status != PJ_SUCCESS) {
+            set_pj_error("hold", status);
+            return -1;
+        }
+    }
+    status = pjsua_call_reinvite(other, PJSUA_CALL_UNHOLD, NULL);
+    if (status != PJ_SUCCESS) {
+        set_pj_error("resume", status);
+        return -1;
+    }
+    EnterCriticalSection(&g_cs);
+    swap_roles_locked(other, current, "CONFIRMED");
+    LeaveCriticalSection(&g_cs);
+    push_log("calls swapped");
     return 0;
 }
