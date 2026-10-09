@@ -8,7 +8,23 @@ return [
 	'token_file' => '/var/spool/asterisk/ihf-softphone/tokens.json',
 	// Default bearer TTL; self-service enrol emails use enrol_token_ttl_seconds when set.
 	'token_ttl_seconds' => 259200, // 72h — matches welcome "expires in 72 hours"
-	'cors_origin' => '*',
+	/**
+	 * Device token issued when an app opens the setup link (/v1/session). Sliding: renewed while the app
+	 * is in use, so a device never has to sign in again. 180 days of no use ends it.
+	 */
+	'device_token_ttl_seconds' => 15552000,
+	/** How many devices one setup link may set up (a phone and a PC from one email = 2). */
+	'setup_link_max_uses' => 3,
+
+	/** POST /v1/login brute-force guard; failures are logged for fail2ban ("ihf-softphone: login failed"). */
+	'login_limit_file' => '/var/spool/asterisk/ihf-softphone/login-limits.json',
+	'login_max_failures' => 5,        // per username + IP inside the window
+	'login_max_failures_ip' => 20,    // per IP, all usernames
+	'login_window_seconds' => 900,
+	/** Reverse proxies whose X-Forwarded-For is believed. Empty = use the connecting address only. */
+	'trusted_proxies' => [],
+	// Off: the apps are native and the admin UI is same-origin. Set an origin only for a browser client you run.
+	'cors_origin' => '',
 
 	/**
 	 * Softphone admin UI (/ihf-softphone/admin/) + /v1/admin/* APIs.
@@ -40,6 +56,21 @@ return [
 	 */
 	'mail_from' => 'notify@pbx.example.com',
 	'mail_from_name' => 'Softphone',
+	/** Optional welcome-email branding. Empty values are left out of the message. */
+	'mail_brand_line' => '',          // small caps under the name, e.g. your company
+	'mail_footer_line' => '',         // last line, e.g. "Canadian-hosted Cloud PBX"
+	'mail_emblem' => '',              // image inside this directory, e.g. 'brand/emblem.png'
+
+	/**
+	 * DID => extension, used only when User Manager does not give exactly one extension for a user's SMS DID.
+	 * Example: [ '15555550100' => '1001' ]
+	 */
+	'did_extension_map' => [],
+
+	/*
+	 * Call history and recordings (/v1/lines/{did}/calls) follow the UCP "Call History" settings in
+	 * User Manager for each user: enable, assigned extensions, playback, download. Nothing to set here.
+	 */
 
 	/** Public POST /v1/request-enrol rate limits (file-backed). */
 	'enrol_request_limit_file' => '/var/spool/asterisk/ihf-softphone/enrol-request-limits.json',

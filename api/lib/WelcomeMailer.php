@@ -5,16 +5,32 @@
  * The message clients see is HTML: a button, not the raw setup URL.
  * A plain-text part is included for mail apps that do not show HTML.
  *
- * From / Reply-To / envelope (-f) use config.php mail_from.
- * Example: notify@pbx.example.com
+ * From / Reply-To / envelope (-f) use config.php mail_from (an identity the PBX may send as).
+ * Branding is config too: mail_brand_line (small caps under the name), mail_footer_line, and
+ * mail_emblem (file under the BFF directory, served next to /enrol/). Empty values are left out.
  */
 class WelcomeMailer {
 	private $from;
 	private $fromName;
+	private $brandLine;
+	private $footerLine;
+	private $emblem;
 
-	public function __construct(string $from = 'notify@pbx.example.com', string $fromName = 'Softphone') {
+	public function __construct(
+		string $from = 'notify@pbx.example.com',
+		string $fromName = 'Softphone',
+		string $brandLine = '',
+		string $footerLine = '',
+		string $emblem = ''
+	) {
 		$this->from = $from !== '' ? $from : 'notify@pbx.example.com';
 		$this->fromName = $fromName !== '' ? $fromName : 'Softphone';
+		$this->brandLine = trim($brandLine);
+		$this->footerLine = trim($footerLine);
+		// Relative path inside the BFF directory only; anything else is ignored.
+		$emblem = ltrim(trim($emblem), '/');
+		$this->emblem = preg_match('#^[A-Za-z0-9._/-]+\.(png|jpg|jpeg|gif)$#i', $emblem) && strpos($emblem, '..') === false
+			&& is_file(dirname(__DIR__) . '/' . $emblem) ? $emblem : '';
 	}
 
 	/**
@@ -67,7 +83,7 @@ class WelcomeMailer {
 		$lines[] = "$name";
 		$lines[] = '';
 		$lines[] = "Your phone line is ready ($label).";
-		$lines[] = 'Open this email on your phone and tap Set up your phone.';
+		$lines[] = 'Open this email and choose Set up your phone.';
 		$lines[] = '';
 		if ($ext !== '') {
 			$lines[] = "Extension: $ext";
@@ -124,14 +140,24 @@ class WelcomeMailer {
 		$heading = $this->h($label);
 		$details = '';
 		if ($ext !== '') {
-			$details .= '<p style="margin:0 0 4px;font-size:15px;color:#3d4654;">Extension ' . $this->h($ext) . '</p>';
+			$details .= '<p style="margin:0 0 4px;font-size:15px;color:#eef2f8;">Extension ' . $this->h($ext) . '</p>';
 		}
 		if ($did !== '') {
-			$details .= '<p style="margin:0 0 4px;font-size:15px;color:#3d4654;">Number +' . $this->h($did) . '</p>';
+			$details .= '<p style="margin:0 0 4px;font-size:15px;color:#eef2f8;">Number +' . $this->h($did) . '</p>';
 		}
 		$when = $this->friendlyExpiry($expires);
 		$expiry = $when !== ''
-			? '<p style="margin:8px 0 0;font-size:13px;color:#6b7280;">Works once, until ' . $this->h($when) . '.</p>'
+			? '<p style="margin:8px 0 0;font-size:13px;line-height:1.4;color:#8491ad;">Works once, until ' . $this->h($when) . '.</p>'
+			: '';
+		$mark = $this->emblemUrl($enrol);
+		$markHtml = $mark !== ''
+			? '<img src="' . $mark . '" width="42" height="36" alt="" style="display:block;border:0;outline:none;"/>'
+			: '';
+		$brandHtml = $this->brandLine !== ''
+			? '<p style="margin:2px 0 0;font-size:11px;letter-spacing:0.14em;font-weight:700;color:#d4af37;">' . $this->h(strtoupper($this->brandLine)) . '</p>'
+			: '';
+		$footerHtml = $this->footerLine !== ''
+			? '<p style="margin:0 0 8px;font-size:13px;color:#8491ad;">' . $this->h($this->footerLine) . '</p>'
 			: '';
 		$primary = $this->button($enrol, 'Set up your phone');
 		$extraHtml = '';
@@ -149,11 +175,11 @@ class WelcomeMailer {
 			$extraHtml .= $this->button($url, 'Set up ' . $title, true);
 		}
 		$extraBlock = $extraHtml !== ''
-			? '<p style="margin:20px 0 0;font-size:14px;color:#3d4654;">Other lines on this account</p>' . $extraHtml
+			? '<p style="margin:20px 0 0;font-size:14px;color:#aab6cc;">Other lines on this account</p>' . $extraHtml
 			: '';
 		$installBlock = '';
 		if ($this->httpsHref($install) !== '') {
-			$installBlock = '<p style="margin:24px 0 0;font-size:14px;color:#6b7280;">Don\'t have the app yet?</p>'
+			$installBlock = '<p style="margin:24px 0 0;font-size:14px;color:#aab6cc;">Don\'t have the app yet?</p>'
 				. $this->button($install, 'Get the app', true);
 		}
 
@@ -165,21 +191,27 @@ class WelcomeMailer {
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>{$name}</title>
 </head>
-<body style="margin:0;padding:0;background:#f4f1ea;">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f4f1ea;">
+<body style="margin:0;padding:0;background:#040914;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#040914" style="background:#040914;">
 <tr><td align="center" style="padding:28px 16px;">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:480px;background:#ffffff;border-radius:16px;">
-<tr><td style="padding:28px 28px 8px;font-family:Segoe UI,Helvetica,Arial,sans-serif;">
-<p style="margin:0 0 18px;font-size:13px;letter-spacing:0.04em;color:#8a7340;">{$name}</p>
-<h1 style="margin:0 0 8px;font-size:26px;line-height:1.25;font-weight:600;color:#1c2430;">Your phone line is ready</h1>
-<p style="margin:0 0 18px;font-size:16px;line-height:1.45;color:#3d4654;">{$heading}</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#0b132b" style="max-width:520px;background:#0b132b;border-radius:18px;">
+<tr><td style="padding:28px 28px 12px;font-family:Segoe UI,Helvetica,Arial,sans-serif;">
+<table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
+<td style="padding-right:12px;vertical-align:middle;">{$markHtml}</td>
+<td style="vertical-align:middle;">
+<p style="margin:0;font-family:Georgia,Times New Roman,serif;font-size:22px;color:#eef2f8;">{$name}</p>
+{$brandHtml}
+</td></tr></table>
+<h1 style="margin:26px 0 8px;font-family:Georgia,Times New Roman,serif;font-size:32px;line-height:1.15;font-weight:400;color:#eef2f8;">Your phone line<br/>is ready.</h1>
+<p style="margin:0 0 8px;font-size:16px;line-height:1.45;color:#aab6cc;">{$heading}</p>
 {$details}
 {$primary}
-<p style="margin:0;font-size:15px;line-height:1.45;color:#3d4654;">Open this email on your phone and tap the button.</p>
+<p style="margin:0;font-size:15px;line-height:1.45;color:#aab6cc;">Open this email and choose the gold button. On this PC it opens {$name}.</p>
 {$expiry}
 {$extraBlock}
 {$installBlock}
-<p style="margin:28px 0 8px;font-size:13px;color:#6b7280;">No password in this email.</p>
+<p style="margin:28px 0 4px;font-size:13px;color:#8491ad;">No password in this email.</p>
+{$footerHtml}
 </td></tr>
 </table>
 </td></tr>
@@ -194,14 +226,22 @@ HTML;
 		if ($href === '') {
 			return '';
 		}
-		$bg = $secondary ? '#ffffff' : '#c9a227';
-		$color = '#1a1400';
-		$border = $secondary ? 'border:1px solid #d9d3c5;' : '';
+		$bg = $secondary ? '#142040' : '#d4af37';
+		$color = $secondary ? '#eef2f8' : '#0b132b';
+		$border = $secondary ? 'border:1px solid #233052;' : '';
 		$text = $this->h($label);
 		return '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0;">'
 			. '<tr><td bgcolor="' . $bg . '" style="border-radius:10px;' . $border . '">'
 			. '<a href="' . $href . '" style="display:inline-block;padding:14px 28px;font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;color:' . $color . ';text-decoration:none;font-weight:700;">'
 			. $text . '</a></td></tr></table>';
+	}
+
+	/** Absolute URL of the configured emblem, next to the enrol page; '' when none is configured. */
+	private function emblemUrl(string $enrol): string {
+		if ($this->emblem === '' || !preg_match('#^(https://[^/\s]+/ihf-softphone)/enrol/#i', $enrol, $match)) {
+			return '';
+		}
+		return $this->h($match[1] . '/' . $this->emblem);
 	}
 
 	private function httpsHref(string $url): string {

@@ -3,10 +3,29 @@
 class SmsGateway {
 	private $fpbx;
 	private $sms;
+	/** @var array<string,string> DID => extension, from config did_extension_map */
+	private $didExtensionMap = [];
 
-	public function __construct($fpbx) {
+	/**
+	 * @param array<string,string> $didExtensionMap Fallback when User Manager does not give exactly one
+	 *        extension for a DID (config.php did_extension_map). Keys are DIDs in any format.
+	 */
+	public function __construct($fpbx, array $didExtensionMap = []) {
 		$this->fpbx = $fpbx;
 		$this->sms = $fpbx->Sms();
+		foreach ($didExtensionMap as $did => $ext) {
+			$did = self::normalizeDid((string)$did);
+			$ext = trim((string)$ext);
+			if ($did !== '' && ctype_digit($ext)) {
+				$this->didExtensionMap[$did] = $ext;
+			}
+		}
+	}
+
+	/** DID configured for an extension in did_extension_map, or null. */
+	public function didForExtension(string $ext): ?string {
+		$found = array_search(trim($ext), $this->didExtensionMap, true);
+		return $found === false ? null : (string)$found;
 	}
 
 	public static function normalizeDid(string $n): string {
@@ -94,12 +113,15 @@ class SmsGateway {
 			return null;
 		}
 		$ext = $this->guessExtensionForDid($uid, $did);
+		if ($ext === null || $ext === '') {
+			$ext = $this->didExtensionMap[$did] ?? null;
+		}
 		return ($ext !== null && $ext !== '') ? (string)$ext : null;
 	}
 
 	/**
 	 * Set FreePBX Do Not Disturb for an extension (AstDB + Custom:DND device state).
-	 * Matches *78 / *76 so device state Custom:DND{ext} stays in sync.
+	 * Matches *78 / *76 so device state (BLF, ARI presence) sees Custom:DND{ext}.
 	 *
 	 * @return array{ok:bool,enabled:bool,extension:?string,error?:string}
 	 */

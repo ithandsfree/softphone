@@ -89,5 +89,23 @@ Send the returned token as `X-IHF-Token` on later calls. This header name is wha
 | GET/PUT | `/v1/lines/{did}/dnd` | token |
 | GET | `/v1/lines/{did}/sip-credentials` | token |
 | * | `/v1/lines/{did}/…` messages | token |
+| GET | `/v1/lines/{did}/calls?limit=50` | token; UCP Call History must be enabled and the extension assigned to the user |
+| GET | `/v1/lines/{did}/calls/{id}/recording` (`?download=1`) | token; UCP playback (or download) permission |
+
+Call history and recordings use the FreePBX CDR module and the same User Manager settings as UCP's Call History
+(enable, assigned extensions, playback, download). A recording is only served when that call involved the line's
+extension. File paths are never sent to the app.
+
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/v1/lines/{did}/voicemail?limit=100` | token; UCP Voicemail enabled, extension assigned, voicemail on for the extension |
+| GET | `/v1/lines/{did}/voicemail/count` | same; `{"new":n,"old":n}` for badges |
+| GET | `/v1/lines/{did}/voicemail/{id}/audio` (`?download=1`) | same + UCP playback (or download); always PCM WAV (GSM/WAV49 converted with sox) |
+| POST | `/v1/lines/{did}/voicemail/{id}/heard` | same; moves the message to Old |
+| DELETE | `/v1/lines/{did}/voicemail/{id}` | same |
+
+Voicemail uses the FreePBX Voicemail module (`lib/VoicemailBox.php`), the data UCP's Voicemail widget shows. New =
+INBOX and Urgent, heard = Old. Audio is only served for a message the module lists for that extension, from a file
+under the voicemail spool.
 
 SIP secrets are returned only on the authenticated HTTPS `sip-credentials` call. They are not put in email or the enrol HTML page.

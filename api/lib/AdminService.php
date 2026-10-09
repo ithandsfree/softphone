@@ -284,7 +284,6 @@ class AdminService {
 			'username' => $existing['username'] ?? null,
 			'email' => $emailOverride ?: ($existing['email'] ?? ''),
 			'label' => $existing['label'] ?? null,
-			'install_url' => $existing['install_url'] ?? null,
 			'send_email' => true,
 		]);
 		return $result;
@@ -401,9 +400,9 @@ class AdminService {
 				return (string)$dids[0]['did'];
 			}
 		} catch (Throwable $e) {
-			return null;
+			// fall through
 		}
-		return null;
+		return $this->sms->didForExtension($ext);
 	}
 
 	private function defaultInstallUrl(string $publicBase): string {
@@ -411,31 +410,44 @@ class AdminService {
 		if ($configured !== '') {
 			return $configured;
 		}
-		$dlRoot = dirname(__DIR__) . '/dl';
-		// Deploy layout: /var/www/html/ihf-softphone/dl
+		$publicBase = rtrim($publicBase, '/');
+		// Stable sideload pointer: the publish script retargets dl/latest at each drop.
+		// A non-empty install_url (Play listing) wins over this.
+		foreach ([
+			'/var/www/html/ihf-softphone/dl/latest',
+			dirname(__DIR__) . '/dl/latest',
+		] as $latest) {
+			if (is_dir($latest)) {
+				return $publicBase . '/dl/latest/';
+			}
+		}
 		$candidates = [
 			'/var/www/html/ihf-softphone/dl',
 			dirname(__DIR__) . '/dl',
-			$dlRoot,
 		];
 		foreach ($candidates as $dir) {
 			if (!is_dir($dir)) {
 				continue;
 			}
-			$entries = @scandir($dir, SCANDIR_SORT_NONE) ?: [];
 			$best = null;
-			$bestMtime = 0;
+			$bestCode = -1;
+			$entries = @scandir($dir, SCANDIR_SORT_NONE) ?: [];
 			foreach ($entries as $name) {
-				if ($name === '.' || $name === '..') {
+				if ($name === '.' || $name === '..' || $name === 'latest') {
 					continue;
 				}
 				$path = $dir . '/' . $name;
-				if (!is_dir($path)) {
+				$index = $path . '/index.html';
+				if (!is_dir($path) || !is_file($index)) {
 					continue;
 				}
-				$mtime = (int)@filemtime($path);
-				if ($mtime >= $bestMtime) {
-					$bestMtime = $mtime;
+				$html = (string)@file_get_contents($index);
+				if (!preg_match('/version:\s*[0-9.]+(?:\s*\(code\s+(\d+))?/i', $html, $m)) {
+					continue;
+				}
+				$code = isset($m[1]) && $m[1] !== '' ? (int)$m[1] : 0;
+				if ($code >= $bestCode) {
+					$bestCode = $code;
 					$best = $name;
 				}
 			}
@@ -452,9 +464,29 @@ class AdminService {
 			throw new RuntimeException('enrol template missing');
 		}
 		$html = file_get_contents($template);
+		$h = static function (string $v): string {
+			return htmlspecialchars($v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+		};
+		// Only https:// for the install link; anything else (javascript:, data:) is dropped.
+		$install = preg_match('#^https://#i', trim($installUrl)) ? trim($installUrl) : '';
+		$product = (string)($this->config['mail_from_name'] ?? 'Softphone');
+		$emblem = ltrim(trim((string)($this->config['mail_emblem'] ?? '')), '/');
+		$emblemHtml = '';
+		if ($emblem !== '' && strpos($emblem, '..') === false && preg_match('#^[A-Za-z0-9._/-]+\.(png|jpg|jpeg|gif|svg)$#i', $emblem)
+			&& is_file(dirname(__DIR__) . '/' . $emblem)) {
+			// The page lives at enrol/<token>/index.html, two levels below the BFF directory.
+			$emblemHtml = '<img src="../../' . $h($emblem) . '" width="42" height="36" alt=""/>';
+		}
 		$html = str_replace(
-			['__TOKEN__', '__DEEP_LINK__', '__LABEL__', '__EXPIRES__', '__INSTALL_URL__'],
-			[$token, $deep, htmlspecialchars($label, ENT_QUOTES, 'UTF-8'), $expIso, $installUrl],
+			[
+				'__TOKEN__', '__DEEP_LINK__', '__LABEL__', '__EXPIRES__', '__INSTALL_URL__',
+				'__PRODUCT__', '__BRAND_LINE__', '__FOOTER_LINE__', '__EMBLEM__',
+			],
+			[
+				$h($token), $h($deep), $h($label), $h($expIso), $h($install),
+				$h($product), $h(strtoupper((string)($this->config['mail_brand_line'] ?? ''))),
+				$h((string)($this->config['mail_footer_line'] ?? '')), $emblemHtml,
+			],
 			$html
 		);
 

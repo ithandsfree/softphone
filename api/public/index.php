@@ -27,6 +27,9 @@ require dirname(__DIR__) . '/lib/WelcomeMailer.php';
 require dirname(__DIR__) . '/lib/AdminService.php';
 require dirname(__DIR__) . '/lib/AdminAuth.php';
 require dirname(__DIR__) . '/lib/EnrolRequestLimiter.php';
+require dirname(__DIR__) . '/lib/CallHistory.php';
+require dirname(__DIR__) . '/lib/VoicemailBox.php';
+require dirname(__DIR__) . '/lib/LoginLimiter.php';
 
 $configFile = dirname(__DIR__) . '/config.php';
 if (!is_readable($configFile)) {
@@ -48,12 +51,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 $path = parse_path();
 $method = $_SERVER['REQUEST_METHOD'];
-$smsGw = new SmsGateway(\FreePBX::create());
+$smsGw = new SmsGateway(\FreePBX::create(), (array)($config['did_extension_map'] ?? []));
 $tokens = new TokenStore($config['token_file'], (int)$config['token_ttl_seconds']);
 $assignments = new AssignmentStore((string)($config['assignments_file'] ?? '/var/spool/asterisk/ihf-softphone/assignments.json'));
 $mailer = new WelcomeMailer(
 	(string)($config['mail_from'] ?? 'notify@pbx.example.com'),
-	(string)($config['mail_from_name'] ?? 'Softphone')
+	(string)($config['mail_from_name'] ?? 'Softphone'),
+	(string)($config['mail_brand_line'] ?? ''),
+	(string)($config['mail_footer_line'] ?? ''),
+	(string)($config['mail_emblem'] ?? '')
 );
 $admin = new AdminService($config, $tokens, $assignments, $mailer, $smsGw);
 $adminAuth = new AdminAuth($config, $tokens);
@@ -98,10 +104,7 @@ try {
 		if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
 			Response::json(400, ['error' => 'invalid_email']);
 		}
-		$ip = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '');
-		if (strpos($ip, ',') !== false) {
-			$ip = trim(explode(',', $ip)[0]);
-		}
+		$ip = LoginLimiter::clientIp($config);
 		$limit = $enrolLimiter->allow($email, $ip);
 		if (empty($limit['ok'])) {
 			// Still generic — do not reveal whether the address exists.
@@ -235,10 +238,24 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 		if ($user === '' || $pass === '') {
 			Response::json(400, ['error' => 'username_and_password_required']);
 		}
+		$limiter = new LoginLimiter(
+			(string)($config['login_limit_file'] ?? '/var/spool/asterisk/ihf-softphone/login-limits.json'),
+			(int)($config['login_max_failures'] ?? 5),
+			(int)($config['login_max_failures_ip'] ?? 20),
+			(int)($config['login_window_seconds'] ?? 900)
+		);
+		$ip = LoginLimiter::clientIp($config);
+		$wait = $limiter->retryAfter($user, $ip);
+		if ($wait > 0) {
+			header('Retry-After: ' . $wait);
+			Response::json(429, ['error' => 'too_many_attempts', 'retry_after' => $wait]);
+		}
 		$uid = \FreePBX::Userman()->checkCredentials($user, $pass);
 		if ($uid === false || $uid === null) {
+			$limiter->failed($user, $ip);
 			Response::json(401, ['error' => 'invalid_credentials']);
 		}
+		$limiter->succeeded($user, $ip);
 		$uid = (int)$uid;
 		$u = \FreePBX::Userman()->getUserByID($uid);
 		$token = $tokens->issue($uid, (string)($u['username'] ?? $user));
@@ -264,14 +281,38 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 		Response::json(401, ['error' => 'unauthorized']);
 	}
 	$uid = (int)$auth['uid'];
+	$role = (string)($auth['role'] ?? '');
+	if ($role === 'admin') {
+		// Admin UI sessions are not app sessions.
+		Response::json(403, ['error' => 'admin_session_not_for_app']);
+	}
 
-	// Token-based enrol / session probe (paste HTTPS enrol token in the app).
+	// The app ends its own session (line removed from a device). Only the presented token is revoked.
+	if ($method === 'POST' && ($path === '/v1/logout' || $path === '/logout')) {
+		$tokens->revoke($tokens->tokenFromRequest());
+		Response::json(200, ['ok' => true]);
+	}
+
+	// Setup: the app opens this with the setup-link (or login) token. The reply carries a long-lived,
+	// sliding device token so voice and messages keep working with no further sign-in. A device token
+	// presented here is echoed as '' (the app keeps it). Old apps that ignore the token keep working
+	// with their setup token until it expires, as before.
 	if ($method === 'GET' && ($path === '/v1/session' || $path === '/session')) {
 		$u = \FreePBX::Userman()->getUserByID($uid);
+		$username = (string)($auth['username'] ?? $u['username'] ?? '');
+		$deviceTtl = max(86400, (int)($config['device_token_ttl_seconds'] ?? 15552000));
+		$issued = '';
+		if ($role !== 'device') {
+			// A setup link sets up at most setup_link_max_uses devices (phone + PC from one email is 2).
+			$uses = $tokens->countUse($tokens->tokenFromRequest());
+			if ($uses > max(1, (int)($config['setup_link_max_uses'] ?? 3))) {
+				Response::json(401, ['error' => 'setup_link_used', 'detail' => 'Ask for a new setup email.']);
+			}
+			$issued = $tokens->issue($uid, $username, ['ttl' => $deviceTtl, 'role' => 'device']);
+		}
 		Response::json(200, [
-			// Client already holds the bearer; echo empty so JSON shape matches login.
-			'token' => '',
-			'expires_in' => max(0, (int)(($auth['exp'] ?? time()) - time())),
+			'token' => $issued,
+			'expires_in' => $issued !== '' ? $deviceTtl : max(0, (int)(($auth['exp'] ?? time()) - time())),
 			'user' => [
 				'id' => $uid,
 				'username' => (string)($auth['username'] ?? $u['username'] ?? ''),
@@ -457,6 +498,85 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 		}
 		$result = $sms->sendMedia($uid, $did, $to, $_FILES['file']);
 		Response::json($result['ok'] ? 200 : 502, $result);
+	}
+
+	// PBX call history for the line's extension, with UCP's Call History permissions.
+	if ($method === 'GET' && preg_match('#^/v1/lines/([^/]+)/calls$#', $path, $m)) {
+		$did = SmsGateway::normalizeDid(urldecode($m[1]));
+		if (!$sms->userOwnsDid($uid, $did)) {
+			Response::json(403, ['error' => 'did_not_assigned']);
+		}
+		$ext = (string)$sms->extensionForDid($uid, $did);
+		$history = new CallHistory($sms);
+		$perms = $history->permissions($uid, $ext);
+		if (!$perms['history']) {
+			Response::json(403, ['error' => 'call_history_disabled', 'permissions' => $perms]);
+		}
+		$limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 50;
+		Response::json(200, ['extension' => $ext, 'permissions' => $perms, 'calls' => $history->calls($ext, $limit)]);
+	}
+
+	if ($method === 'GET' && preg_match('#^/v1/lines/([^/]+)/calls/([0-9]+[._][0-9]+)/recording$#', $path, $m)) {
+		$did = SmsGateway::normalizeDid(urldecode($m[1]));
+		if (!$sms->userOwnsDid($uid, $did)) {
+			Response::json(403, ['error' => 'did_not_assigned']);
+		}
+		$ext = (string)$sms->extensionForDid($uid, $did);
+		$history = new CallHistory($sms);
+		$perms = $history->permissions($uid, $ext);
+		$download = !empty($_GET['download']);
+		if (!$perms['history'] || !($download ? $perms['download'] : $perms['playback'])) {
+			Response::json(403, ['error' => $download ? 'download_disabled' : 'playback_disabled']);
+		}
+		$file = $history->recordingPath($ext, $m[2]);
+		if ($file === null) {
+			Response::json(404, ['error' => 'recording_not_found']);
+		}
+		CallHistory::stream($file, $download);
+	}
+
+	// Voicemail for the line's extension, with UCP's Voicemail permissions.
+	if (preg_match('#^/v1/lines/([^/]+)/voicemail(?:/(count)|/([A-Za-z0-9_.-]{1,80})(?:/(audio|heard))?)?$#', $path, $m)) {
+		$did = SmsGateway::normalizeDid(urldecode($m[1]));
+		if (!$sms->userOwnsDid($uid, $did)) {
+			Response::json(403, ['error' => 'did_not_assigned']);
+		}
+		$ext = (string)$sms->extensionForDid($uid, $did);
+		$box = new VoicemailBox();
+		$perms = $box->permissions($uid, $ext);
+		if (!$perms['voicemail']) {
+			Response::json(403, ['error' => 'voicemail_disabled', 'permissions' => $perms]);
+		}
+		$count = ($m[2] ?? '') === 'count';
+		$id = $m[3] ?? '';
+		$action = $m[4] ?? '';
+		if ($method === 'GET' && $count) {
+			Response::json(200, ['extension' => $ext] + $box->counts($ext));
+		}
+		if ($method === 'GET' && $id === '') {
+			$limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 100;
+			Response::json(200, ['extension' => $ext, 'permissions' => $perms, 'dial' => VoicemailBox::mailboxCode()] + $box->messages($ext, $limit));
+		}
+		if ($method === 'GET' && $id !== '' && $action === 'audio') {
+			$download = !empty($_GET['download']);
+			if (!($download ? $perms['download'] : $perms['playback'])) {
+				Response::json(403, ['error' => $download ? 'download_disabled' : 'playback_disabled']);
+			}
+			$file = $box->audioPath($ext, $id);
+			if ($file === null) {
+				Response::json(404, ['error' => 'voicemail_not_found']);
+			}
+			VoicemailBox::stream($file, $id, $download);
+		}
+		if ($method === 'POST' && $id !== '' && $action === 'heard') {
+			$ok = $box->markHeard($ext, $id);
+			Response::json($ok ? 200 : 404, ($ok ? ['ok' => true] : ['error' => 'voicemail_not_found']) + $box->counts($ext));
+		}
+		if ($method === 'DELETE' && $id !== '' && $action === '') {
+			$ok = $box->delete($ext, $id);
+			Response::json($ok ? 200 : 404, ($ok ? ['ok' => true] : ['error' => 'voicemail_not_found']) + $box->counts($ext));
+		}
+		Response::json(405, ['error' => 'method_not_allowed']);
 	}
 
 	if ($method === 'GET' && preg_match('#^/v1/media/([^/]+)$#', $path, $m)) {
