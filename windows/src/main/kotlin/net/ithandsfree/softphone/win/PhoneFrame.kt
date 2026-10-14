@@ -150,6 +150,12 @@ class PhoneFrame(
     private val callTabs = JPanel()
     private val callsBody = JPanel(java.awt.CardLayout())
     private val contactsList = net.ithandsfree.softphone.win.ui.WidthTrackingPanel()
+    private val contactSearch = JTextField().apply {
+        putClientProperty(com.formdev.flatlaf.FlatClientProperties.PLACEHOLDER_TEXT, "Search name or number")
+    }
+    /** A to Z jump bar above the contact list; letters without contacts are dimmed. */
+    private val contactLetters = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 2, 0))
+    private var contactsScrollPane: JScrollPane? = null
     private var callsView = "recents"
     private val historyFilters = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0))
     private val lineList = JPanel()
@@ -1468,10 +1474,35 @@ class PhoneFrame(
         contactsScroll.border = EmptyBorder(0, 0, 0, 0)
         contactsScroll.background = ground
         contactsScroll.viewport.background = ground
+        contactsScrollPane = contactsScroll
+        // Search box and A to Z bar above the contact list (same as the Android Contacts screen).
+        contactSearch.putClientProperty(com.formdev.flatlaf.FlatClientProperties.TEXT_FIELD_LEADING_ICON,
+            net.ithandsfree.softphone.win.ui.Icons.get("search", 16, tokens.textMuted))
+        contactSearch.font = net.ithandsfree.softphone.win.ui.Type.ui(net.ithandsfree.softphone.win.ui.Type.LABEL + 1)
+        contactSearch.maximumSize = Dimension(Int.MAX_VALUE, 38)
+        contactSearch.preferredSize = Dimension(300, 38)
+        contactSearch.getAccessibleContext().accessibleName = "Search contacts"
+        contactSearch.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent) = reloadContacts()
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent) = reloadContacts()
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent) = reloadContacts()
+        })
+        contactLetters.isOpaque = false
+        val contactsHead = JPanel(BorderLayout(0, 8)).apply {
+            background = ground
+            border = EmptyBorder(8, 4, 8, 4)
+            add(contactSearch, BorderLayout.NORTH)
+            add(contactLetters, BorderLayout.SOUTH)
+        }
+        val contactsBody = JPanel(BorderLayout()).apply {
+            background = ground
+            add(contactsHead, BorderLayout.NORTH)
+            add(contactsScroll, BorderLayout.CENTER)
+        }
         val voicemail = voicemailView()
         callsBody.background = ground
         callsBody.add(recentsBody, "recents")
-        callsBody.add(contactsScroll, "contacts")
+        callsBody.add(contactsBody, "contacts")
         callsBody.add(voicemail, "voicemail")
         col.add(callsBody, BorderLayout.CENTER)
         styleCallTabs()
@@ -1912,14 +1943,58 @@ class PhoneFrame(
         if (::callsTabs.isInitialized) callsTabs.select(callsView)
     }
 
+    /** First letter for the A to Z sections; names starting with anything else go under "#". */
+    private fun contactSection(name: String): Char {
+        val first = name.trim().firstOrNull()?.uppercaseChar() ?: '#'
+        return if (first in 'A'..'Z') first else '#'
+    }
+
+    /** Contacts A to Z with letter headers, filtered by the search box (name or digits), and the letter bar. */
     private fun reloadContacts() {
         contactsList.removeAll()
-        val people = ContactBook.load()
-        if (people.isEmpty()) {
-            contactsList.add(label("No contacts yet. Import a file from Settings."))
-        } else {
-            people.forEach { contactsList.add(contactRow(it)) }
+        contactLetters.removeAll()
+        val all = ContactBook.load()
+        val q = contactSearch.text.trim()
+        val digits = q.filter { it.isDigit() }
+        val people = all
+            .filter { p ->
+                q.isEmpty() || p.name.contains(q, ignoreCase = true) ||
+                    (digits.length >= 2 && p.number.filter { it.isDigit() }.contains(digits))
+            }
+            .sortedWith(compareBy({ contactSection(it.name) == '#' }, { it.name.lowercase() }))
+        val anchors = linkedMapOf<Char, JComponent>()
+        when {
+            all.isEmpty() -> contactsList.add(label("No contacts yet. Import a file from Settings."))
+            people.isEmpty() -> contactsList.add(label("No contact matches \"$q\"."))
+            else -> people.groupBy { contactSection(it.name) }.forEach { (letter, rows) ->
+                val header = net.ithandsfree.softphone.win.ui.sectionLabel(tokens, letter.toString())
+                anchors[letter] = header
+                contactsList.add(header)
+                rows.forEach { contactsList.add(contactRow(it)) }
+            }
         }
+        // Letter bar only for the full list; while searching the results are already short.
+        if (q.isEmpty() && anchors.size > 1) {
+            (('A'..'Z') + '#').forEach { letter ->
+                val anchor = anchors[letter]
+                val btn = JLabel(letter.toString())
+                btn.font = net.ithandsfree.softphone.win.ui.Type.ui(net.ithandsfree.softphone.win.ui.Type.LABEL)
+                btn.foreground = if (anchor != null) tokens.actionText else tokens.textMuted
+                btn.border = EmptyBorder(2, 4, 2, 4)
+                if (anchor != null) {
+                    btn.cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+                    btn.toolTipText = "Jump to $letter"
+                    btn.addMouseListener(object : java.awt.event.MouseAdapter() {
+                        override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                            contactsScrollPane?.viewport?.viewPosition = java.awt.Point(0, anchor.y)
+                        }
+                    })
+                }
+                contactLetters.add(btn)
+            }
+        }
+        contactLetters.revalidate()
+        contactLetters.repaint()
         contactsList.revalidate()
         contactsList.repaint()
     }
