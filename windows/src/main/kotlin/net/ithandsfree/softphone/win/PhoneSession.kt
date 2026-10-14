@@ -21,6 +21,9 @@ data class EnrolledLine(
 ) {
     val signedIn: Boolean get() = umUsername.isNotBlank() && umPassword.isNotBlank()
 
+    /** No texting number yet: the server lists the line under its extension (calls, voicemail, history work). */
+    val voiceOnly: Boolean get() = did.isBlank() || did == extension
+
     override fun toString(): String = "line $extension did $did"
 }
 
@@ -108,6 +111,27 @@ class PhoneSession(host: HostConfig) {
             }
         }
         return upgraded
+    }
+
+    /**
+     * A voice-only line (listed under its extension) that has since been given a texting number, or a number that
+     * was removed again: the line follows the server's list by extension, so Messages turns on with no re-setup.
+     * Returns the extensions whose number changed.
+     */
+    fun followLineNumbers(): List<String> {
+        val changed = mutableListOf<String>()
+        book.toList().forEach { line ->
+            val listed = runCatching { authed(line) { token -> api().lines(token).lines } }.getOrNull() ?: return@forEach
+            val match = listed.firstOrNull { it.extension == line.extension } ?: return@forEach
+            if (match.did.isNotBlank() && match.did != line.did) {
+                val index = book.indexOfFirst { it.extension == line.extension }
+                if (index >= 0) {
+                    replace(index, book[index].copy(did = match.did))
+                    changed += line.extension
+                }
+            }
+        }
+        return changed
     }
 
     /** PBX call history for a line. A 403 means UCP Call History is off for this user or extension. */
@@ -438,6 +462,7 @@ class PhoneSession(host: HostConfig) {
     fun sendText(to: String, body: String): String {
         val enrolled = line ?: error("Enrol a line first.")
         if (to.isBlank() || body.isBlank()) throw IllegalArgumentException("Enter a number and a message.")
+        if (enrolled.voiceOnly) throw IllegalStateException("This line has no texting number yet. Calls and voicemail work.")
         authed(enrolled) { token -> api().sendSms(token, enrolled.did, to.trim(), body) }
         return "Sent"
     }
@@ -445,12 +470,14 @@ class PhoneSession(host: HostConfig) {
     internal fun sendPhoto(to: String, photo: MmsPhoto): String {
         val enrolled = line ?: error("Enrol a line first.")
         if (to.isBlank()) throw IllegalArgumentException("Enter a number for the photo.")
+        if (enrolled.voiceOnly) throw IllegalStateException("This line has no texting number yet. Calls and voicemail work.")
         authed(enrolled) { token -> api().sendMedia(token, enrolled.did, to.trim(), photo) }
         return "Sent"
     }
 
     fun threads(): List<ThreadInfo> {
         val enrolled = line ?: error("Enrol a line first.")
+        if (enrolled.voiceOnly) return emptyList()
         return authed(enrolled) { token -> api().listThreads(token, enrolled.did).threads }
     }
 

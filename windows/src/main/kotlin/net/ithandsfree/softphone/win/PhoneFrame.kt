@@ -387,7 +387,11 @@ class PhoneFrame(
             // Rows were built before the lines were restored; redraw them with line names and colours.
             reloadRecents()
             // Setup-link tokens become long-lived device tokens (no sign-in screen for messages).
-            work("Lines") { session.upgradeTokens() }
+            work("Lines") {
+                session.upgradeTokens()
+                // A voice-only line that has been given a texting number switches to it (Messages turns on).
+                if (session.followLineNumbers().isNotEmpty()) SwingUtilities.invokeLater { refreshLine() }
+            }
             SwingUtilities.invokeLater { dial.requestFocusInWindow() }
             refreshLine()
             askedRegister = true
@@ -3695,7 +3699,14 @@ class PhoneFrame(
     }
 
     private fun refreshThreads(notify: Boolean = false) {
-        if (session.line == null) return
+        val current = session.line ?: return
+        if (current.voiceOnly) {
+            // No texting number on this line: nothing to load. Say so when the person opens Messages.
+            if (!notify && currentTab == "messages") {
+                note("Extension ${current.extension} has no texting number yet. Calls and voicemail work; messages appear here once your administrator adds one.")
+            }
+            return
+        }
         work("Messages") {
             val rows = session.threads()
             val unread = rows.sumOf { it.unread }
