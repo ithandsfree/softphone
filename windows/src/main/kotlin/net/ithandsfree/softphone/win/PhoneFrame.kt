@@ -720,7 +720,7 @@ class PhoneFrame(
             override fun mouseClicked(event: java.awt.event.MouseEvent) {
                 work("Photo") {
                     val image = loadPhoto(source) ?: throw IllegalStateException("Photo is not available")
-                    SwingUtilities.invokeLater { showLargePhoto(image) }
+                    SwingUtilities.invokeLater { showLargePhoto(image, source) }
                 }
             }
         })
@@ -739,16 +739,27 @@ class PhoneFrame(
         return image
     }
 
-    /** Full-size photo, aspect ratio kept, fitted to 85% of the screen; Esc closes. Never modal (call timer). */
-    private fun showLargePhoto(image: java.awt.Image) {
+    /**
+     * Full-size photo, aspect ratio kept, fitted to 85% of the screen; Esc closes. Never modal (call timer).
+     * Save writes the picture as received; Copy puts it on the clipboard for pasting into email, Word, Teams.
+     */
+    private fun showLargePhoto(image: java.awt.Image, source: String) {
         val dialog = JDialog(this, "Photo")
         dialog.isModal = false
-        dialog.contentPane = net.ithandsfree.softphone.win.ui.PhotoViewer(tokens, image)
+        val viewer = net.ithandsfree.softphone.win.ui.PhotoViewer(tokens, image)
         val screen = graphicsConfiguration.bounds
         val iw = image.getWidth(null).coerceAtLeast(1).toDouble()
         val ih = image.getHeight(null).coerceAtLeast(1).toDouble()
-        val fit = minOf(screen.width * 0.85 / iw, screen.height * 0.85 / ih, 1.0)
-        dialog.contentPane.preferredSize = Dimension((iw * fit).toInt().coerceAtLeast(240), (ih * fit).toInt().coerceAtLeast(160))
+        val fit = minOf(screen.width * 0.85 / iw, screen.height * 0.8 / ih, 1.0)
+        viewer.preferredSize = Dimension((iw * fit).toInt().coerceAtLeast(320), (ih * fit).toInt().coerceAtLeast(160))
+        val actions = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.CENTER, 10, 8))
+        actions.background = tokens.ground
+        actions.add(net.ithandsfree.softphone.win.ui.PillButton(tokens, "Save picture…", height = 38) { savePhoto(dialog, source) })
+        actions.add(net.ithandsfree.softphone.win.ui.PillButton(tokens, "Copy", height = 38) { copyPhoto(image) })
+        val content = JPanel(BorderLayout())
+        content.add(viewer, BorderLayout.CENTER)
+        content.add(actions, BorderLayout.SOUTH)
+        dialog.contentPane = content
         dialog.pack()
         dialog.setLocationRelativeTo(this)
         dialog.rootPane.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(javax.swing.KeyStroke.getKeyStroke("ESCAPE"), "close")
@@ -756,6 +767,44 @@ class PhoneFrame(
             override fun actionPerformed(e: java.awt.event.ActionEvent) = dialog.dispose()
         })
         dialog.isVisible = true
+    }
+
+    /** Save the picture exactly as received (no re-compression) to a file the person picks; Pictures by default. */
+    private fun savePhoto(owner: java.awt.Window, source: String) {
+        val chooser = javax.swing.JFileChooser(java.io.File(System.getProperty("user.home"), "Pictures"))
+        chooser.dialogTitle = "Save picture"
+        chooser.selectedFile = java.io.File(chooser.currentDirectory, photoFileName(source))
+        if (chooser.showSaveDialog(owner) != javax.swing.JFileChooser.APPROVE_OPTION) return
+        val target = chooser.selectedFile
+        work("Save picture") {
+            val bytes = session.media(source)
+            target.writeBytes(bytes)
+            note("Picture saved: ${target.name}")
+        }
+    }
+
+    /** File name from the media name, with the extension the picture really has. */
+    private fun photoFileName(source: String): String {
+        val base = java.net.URLDecoder.decode(source.substringAfterLast('/').substringBefore('?'), "UTF-8")
+            .substringBeforeLast('.').replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_').ifBlank { "picture" }.take(60)
+        val ext = source.substringAfterLast('.', "").substringBefore('?').lowercase()
+            .takeIf { it in setOf("jpg", "jpeg", "png", "gif", "webp") } ?: "jpg"
+        return "IHF_$base.$ext"
+    }
+
+    private fun copyPhoto(image: java.awt.Image) {
+        val selection = object : java.awt.datatransfer.Transferable {
+            override fun getTransferDataFlavors() = arrayOf(java.awt.datatransfer.DataFlavor.imageFlavor)
+            override fun isDataFlavorSupported(flavor: java.awt.datatransfer.DataFlavor) =
+                flavor == java.awt.datatransfer.DataFlavor.imageFlavor
+            override fun getTransferData(flavor: java.awt.datatransfer.DataFlavor): Any {
+                if (!isDataFlavorSupported(flavor)) throw java.awt.datatransfer.UnsupportedFlavorException(flavor)
+                return image
+            }
+        }
+        runCatching { java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(selection, null) }
+            .onSuccess { note("Picture copied") }
+            .onFailure { note("Copy failed: ${it.message}") }
     }
 
     private fun submitTransfer() {
