@@ -43,6 +43,11 @@ import net.ithandsfree.softphone.notify.NotifyPrefs
  * the user allows unrestricted battery for IHF Phone.
  */
 class SipRegistrationService : Service() {
+    override fun onCreate() {
+        super.onCreate()
+        running = this
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var loopJob: Job? = null
 
@@ -73,7 +78,14 @@ class SipRegistrationService : Service() {
         return START_STICKY
     }
 
+    /** Android 15+: a time-limited service type ran out of time. Stop cleanly (no crash); the app shows why. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        NotifyPrefs(this).markSipFgsFailure("time limit reached (type $fgsType)")
+        stopSelf()
+    }
+
     override fun onDestroy() {
+        if (running === this) running = null
         loopJob?.cancel()
         scope.cancel()
         super.onDestroy()
@@ -110,7 +122,7 @@ class SipRegistrationService : Service() {
             this,
             NOTIF_ID,
             notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            foregroundTypes(),
         )
         if (ok) {
             NotifyPrefs(this).clearSipFgsFailure()
@@ -118,6 +130,23 @@ class SipRegistrationService : Service() {
             NotifyPrefs(this).markSipFgsFailure("startForeground failed")
         }
         return ok
+    }
+
+    /**
+     * dataSync keeps REGISTER alive. During a call registered with Telecom ([TelecomBridge]) the service also
+     * claims phoneCall, which keeps the microphone working with the screen off or when answered from the car.
+     */
+    private fun foregroundTypes(): Int {
+        // Android 15+ caps dataSync services at 6 h a day (the "could not keep voice registered" evenings). From
+        // Android 14 the keep-alive is a specialUse service (VoIP registration, declared in the manifest and the
+        // Play Console), which has no daily cap. ForegroundStarts still falls back to dataSync if it is refused.
+        var types = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
+        if (callUp && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        return types
     }
 
     private fun ensureLoop() {
@@ -189,6 +218,16 @@ class SipRegistrationService : Service() {
 
     companion object {
         const val ACTION_START = "net.ithandsfree.softphone.sip.START_SIP_REG"
+
+        @Volatile private var running: SipRegistrationService? = null
+        @Volatile private var callUp = false
+
+        /** From [TelecomBridge]: re-promote the running service with or without the phoneCall type. Main thread. */
+        fun callStateChanged(up: Boolean) {
+            if (callUp == up) return
+            callUp = up
+            running?.let { svc -> runCatching { svc.startAsForegroundSafe() } }
+        }
         const val ACTION_STOP = "net.ithandsfree.softphone.sip.STOP_SIP_REG"
         const val ACTION_REREGISTER = "net.ithandsfree.softphone.sip.REREGISTER_SIP"
         const val CHANNEL_ID = "ihf_sip_registration"

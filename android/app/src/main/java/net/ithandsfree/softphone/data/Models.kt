@@ -24,7 +24,16 @@ data class SoftphoneAccount(
     val capSms: Boolean = true,
     val capMms: Boolean = true,
     val capDnd: Boolean = false,
-)
+    /** True only when the owner renamed the line in the app. Otherwise the line shows its extension. */
+    val customLabel: Boolean = false,
+) {
+    /**
+     * Name shown for the line: its extension ("1002"), which is what the person knows it by and stays right when an
+     * extension changes hands, unless the owner gave it a custom name. Same rule as the desktop app.
+     */
+    val displayName: String
+        get() = if (customLabel && label.isNotBlank()) label else sipExtension.ifBlank { label }
+}
 
 @Serializable
 data class BrandingInfo(
@@ -180,4 +189,61 @@ data class DndResponse(
     val enabled: Boolean = false,
     val extension: String? = null,
     val error: String? = null,
+)
+
+/** PBX call history for one line (`GET /v1/lines/{did}/calls`). */
+@Serializable
+data class PbxCallsResponse(
+    val extension: String? = null,
+    val permissions: PbxCallPermissions = PbxCallPermissions(),
+    val calls: List<PbxCall> = emptyList(),
+)
+
+@Serializable
+data class PbxCallPermissions(val history: Boolean = false, val playback: Boolean = false, val download: Boolean = false)
+
+@Serializable
+data class PbxCall(
+    val id: String = "",
+    /** Unix seconds, call start. */
+    val at: Long = 0,
+    val direction: String = "",
+    val peer: String = "",
+    @SerialName("peer_name") val peerName: String = "",
+    val disposition: String = "",
+    val duration: Int = 0,
+    val billsec: Int = 0,
+    val recording: Boolean = false,
+    val format: String? = null,
+)
+
+/** Voicemail for one line (`GET /v1/lines/{did}/voicemail`). */
+@Serializable
+data class VoicemailResponse(
+    val extension: String? = null,
+    val permissions: VoicemailPermissions = VoicemailPermissions(),
+    /** The PBX's "My Voicemail" feature code (*97 by default); blank when the admin turned it off. */
+    val dial: String = "",
+    val new: Int = 0,
+    val old: Int = 0,
+    val messages: List<Voicemail> = emptyList(),
+)
+
+@Serializable
+data class VoicemailPermissions(val voicemail: Boolean = false, val playback: Boolean = false, val download: Boolean = false)
+
+@Serializable
+data class VoicemailCount(val extension: String? = null, val new: Int = 0, val old: Int = 0)
+
+@Serializable
+data class Voicemail(
+    val id: String = "",
+    val folder: String = "",
+    val new: Boolean = false,
+    val urgent: Boolean = false,
+    /** Unix seconds when the message was left. */
+    val at: Long = 0,
+    val number: String = "",
+    val name: String = "",
+    val duration: Int = 0,
 )

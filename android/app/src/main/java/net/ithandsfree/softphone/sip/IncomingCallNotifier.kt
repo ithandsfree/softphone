@@ -21,27 +21,30 @@ import net.ithandsfree.softphone.data.formatDidForDisplay
  * starts — [NotificationCompat.Builder.setFullScreenIntent] is the supported path.
  */
 object IncomingCallNotifier {
-    const val CHANNEL_ID = "ihf_incoming_calls"
+    /**
+     * v2 (0.4.16): high importance (heads-up banner and full-screen call screen) but no sound or vibration of its
+     * own, because [CallRinger] plays the line's ringtone and vibrates. The alert must NOT be posted as "silent":
+     * Android shows silent notifications without a banner and never launches their full-screen intent (the 0.4.14
+     * regression). A channel's sound cannot be changed after creation, hence the new id.
+     */
+    const val CHANNEL_ID = "ihf_incoming_calls_v2"
+    private const val OLD_CHANNEL_ID = "ihf_incoming_calls"
     const val NOTIF_ID = 42020
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val mgr = context.getSystemService(NotificationManager::class.java) ?: return
+        runCatching { mgr.deleteNotificationChannel(OLD_CHANNEL_ID) }
         if (mgr.getNotificationChannel(CHANNEL_ID) != null) return
-        val attrs = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .build()
         mgr.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
                 "Incoming calls",
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Full-screen ring for softphone INVITEs"
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 800, 400, 800, 400, 800)
-                setSound(Settings.System.DEFAULT_RINGTONE_URI, attrs)
+                description = "Incoming call banner and full-screen call screen (the app plays the ringtone)"
+                setSound(null, null)
+                enableVibration(false)
                 setBypassDnd(false)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             },
@@ -52,7 +55,10 @@ object IncomingCallNotifier {
         context: Context,
         remoteUri: String,
         lineLabel: String,
+        lineId: String? = null,
     ) {
+        // Self-managed Telecom calls get no ring from Android: ring here (line ringtone, ring mode respected).
+        CallRinger.start(context, lineId)
         ensureChannel(context)
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
 
@@ -112,8 +118,8 @@ object IncomingCallNotifier {
             .setOngoing(true)
             .setAutoCancel(false)
             .setTimeoutAfter(90_000L)
-            .setSound(Settings.System.DEFAULT_RINGTONE_URI)
-            .setVibrate(longArrayOf(0, 800, 400, 800, 400, 800))
+            // Not setSilent: that hides the banner and the full-screen call screen. The v2 channel has no sound or
+            // vibration, so CallRinger's ringtone is the only sound.
             .setContentIntent(contentPi)
             .setFullScreenIntent(fullScreenPi, true)
             .addAction(
@@ -134,6 +140,7 @@ object IncomingCallNotifier {
     }
 
     fun cancel(context: Context) {
+        CallRinger.stop()
         NotificationManagerCompat.from(context).cancel(NOTIF_ID)
     }
 

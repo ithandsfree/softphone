@@ -13,6 +13,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import net.ithandsfree.softphone.data.normalizeEnrolToken
+import net.ithandsfree.softphone.data.numberFromPaste
 import net.ithandsfree.softphone.sip.IncomingCallNotifier
 import net.ithandsfree.softphone.sip.LockScreenCallPolicy
 import net.ithandsfree.softphone.ui.SoftphoneNav
@@ -28,6 +29,9 @@ class MainActivity : ComponentActivity() {
     private val deepLinkEnrolToken = mutableStateOf<String?>(null)
     private val deepLinkDemoSeed = mutableStateOf<Uri?>(null)
     private val openMessagesPeer = mutableStateOf<String?>(null)
+
+    /** A number from another app (Google Maps "Call", a web page): opens the keypad with it, never dials by itself. */
+    private val dialNumber = mutableStateOf<String?>(null)
     private val showIncomingCall = mutableStateOf(false)
 
     /**
@@ -39,6 +43,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        net.ithandsfree.softphone.diag.CrashLog.step(this, "main screen")
         returnToLockWhenCallEnds =
             savedInstanceState?.getBoolean(STATE_RETURN_TO_LOCK) == true
         enableEdgeToEdge()
@@ -53,6 +58,7 @@ class MainActivity : ComponentActivity() {
             val enrolToken by deepLinkEnrolToken
             val demoSeed by deepLinkDemoSeed
             val messagesPeer by openMessagesPeer
+            val numberToDial by dialNumber
             val incoming by showIncomingCall
             IhfTheme(skin = skin) {
                 SoftphoneNav(
@@ -69,6 +75,8 @@ class MainActivity : ComponentActivity() {
                     deepLinkDemoSeed = demoSeed,
                     openMessagesPeer = messagesPeer,
                     onOpenMessagesPeerConsumed = { openMessagesPeer.value = null },
+                    dialNumber = numberToDial,
+                    onDialNumberConsumed = { dialNumber.value = null },
                     forceShowIncoming = incoming,
                     onIncomingUiShown = { showIncomingCall.value = false },
                     onCallSessionEnded = { onCallSessionEnded() },
@@ -90,6 +98,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Up and showing for a few seconds: this start finished (clears the safe-mode trail).
+        window.decorView.postDelayed({ net.ithandsfree.softphone.diag.CrashLog.startupDone(this) }, 5_000L)
         val app = application as SoftphoneApp
         if (!app.sipEngine.callSnapshot().active) {
             // Clear stale ring UI if the INVITE already ended while we were away.
@@ -108,6 +118,16 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         enrolTokenFrom(intent)?.let { deepLinkEnrolToken.value = it }
         demoSeedFrom(intent)?.let { deepLinkDemoSeed.value = it }
+        if (intent.data?.scheme.equals("tel", ignoreCase = true) &&
+            (intent.action == Intent.ACTION_DIAL || intent.action == Intent.ACTION_VIEW)
+        ) {
+            numberFromPaste(intent.data?.schemeSpecificPart)?.let { dialNumber.value = it }
+        }
+        // "Call with IHF Phone" on selected text.
+        if (intent.action == Intent.ACTION_PROCESS_TEXT) {
+            val text = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
+            numberFromPaste(text)?.let { dialNumber.value = it }
+        }
         if (intent.getBooleanExtra(EXTRA_OPEN_MESSAGES, false)) {
             openMessagesPeer.value = intent.getStringExtra(EXTRA_OPEN_PEER)
         }

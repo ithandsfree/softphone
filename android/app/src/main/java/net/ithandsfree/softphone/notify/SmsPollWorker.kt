@@ -1,8 +1,12 @@
 package net.ithandsfree.softphone.notify
 
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -22,6 +26,26 @@ class SmsPollWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
+    /**
+     * Required for expedited work ([kick]) on Android 11 and older, where WorkManager runs it as a foreground
+     * service and asks for this notification. Without it every start crashed with "Not implemented"
+     * (a tester's Huawei, Android 10, 2026-10-14). Android 12+ never calls it for expedited work.
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        MessageSyncService.ensureSyncChannel(applicationContext)
+        val notification = NotificationCompat.Builder(applicationContext, MessageSyncService.SYNC_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("Checking messages")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .build()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(FOREGROUND_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            ForegroundInfo(FOREGROUND_ID, notification)
+        }
+    }
+
     override suspend fun doWork(): Result {
         MessageNotifier.ensureChannel(applicationContext)
         return try {
@@ -33,6 +57,7 @@ class SmsPollWorker(
     }
 
     companion object {
+        private const val FOREGROUND_ID = 42011
         private const val UNIQUE_PERIODIC = "ihf_sms_inbox_poll"
         private const val UNIQUE_KICK = "ihf_sms_inbox_poll_kick"
 

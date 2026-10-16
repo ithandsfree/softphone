@@ -9,13 +9,7 @@ import kotlinx.serialization.json.Json
 class AccountStore(context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "ihf_softphone_accounts",
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private val prefs = SecurePrefs.open(context, "ihf_softphone_accounts")
 
     fun list(): List<SoftphoneAccount> {
         val raw = prefs.getString(KEY_ACCOUNTS, "[]") ?: "[]"

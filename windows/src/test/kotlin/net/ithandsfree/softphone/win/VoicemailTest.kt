@@ -43,7 +43,7 @@ class VoicemailTest {
     @Test
     fun parsesTheBffVoicemailList() {
         // Shape returned by the live PBX on 2026-10-08 (number anonymised).
-        val text = """{"extension":"903","permissions":{"voicemail":true,"playback":true,"download":true},"dial":"*97",
+        val text = """{"extension":"1002","permissions":{"voicemail":true,"playback":true,"download":true},"dial":"*97",
             "new":0,"old":1,"messages":[{"id":"1750785621-000000e4","folder":"Old","new":false,"urgent":false,
             "at":1750785621,"number":"Unavailable","name":"","duration":12}]}"""
         val r = Json { ignoreUnknownKeys = true }.decodeFromString(VoicemailResponse.serializer(), text)

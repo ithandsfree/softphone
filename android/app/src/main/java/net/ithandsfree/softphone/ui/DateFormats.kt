@@ -45,3 +45,12 @@ fun formatCallDuration(sec: Int): String {
     val s = sec % 60
     return "%d:%02d".format(m, s)
 }
+
+/** Live in-call clock. Gold mono in the banner. Starts at 00:00 when the call connects. */
+fun formatLiveCallTimer(sec: Int): String {
+    val s = sec.coerceAtLeast(0)
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val r = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, r) else "%02d:%02d".format(m, r)
+}

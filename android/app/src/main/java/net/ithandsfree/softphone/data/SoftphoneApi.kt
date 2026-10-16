@@ -130,6 +130,12 @@ class SoftphoneApi(
             postEmpty(token, "/v1/lines/${enc(did)}/threads/${enc(peer)}/read", MarkReadResponse.serializer())
         }
 
+    /** The newest inbound message goes back to unread (BFF 2026-10-15). */
+    suspend fun markThreadUnread(token: String, did: String, peer: String): MarkReadResponse =
+        withContext(Dispatchers.IO) {
+            postEmpty(token, "/v1/lines/${enc(did)}/threads/${enc(peer)}/unread", MarkReadResponse.serializer())
+        }
+
     suspend fun markDidRead(token: String, did: String): MarkReadResponse =
         withContext(Dispatchers.IO) {
             postEmpty(token, "/v1/lines/${enc(did)}/read-all", MarkReadResponse.serializer())
@@ -204,14 +210,15 @@ class SoftphoneApi(
             }
         }
 
-    suspend fun sendMms(token: String, did: String, to: String, file: File) =
+    /** [file] must be named with its real extension (.jpg, .png, ...): the BFF decides the type from it. */
+    suspend fun sendMms(token: String, did: String, to: String, file: File, mimeType: String = "application/octet-stream") =
         withContext(Dispatchers.IO) {
             val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
                 .addFormDataPart("to", to)
                 .addFormDataPart(
                     "file",
                     file.name,
-                    file.asRequestBody("application/octet-stream".toMediaType()),
+                    file.asRequestBody(mimeType.toMediaType()),
                 )
                 .build()
             val req = Request.Builder()
@@ -220,11 +227,64 @@ class SoftphoneApi(
                 .header(TOKEN_HEADER, token)
                 .build()
             client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) throw ApiException("send_media_failed", resp.code)
+                if (!resp.isSuccessful) {
+                    // Pass the BFF's reason on (unsupported_file_type, file_too_large, ...), not a bare code.
+                    val text = resp.body?.string().orEmpty()
+                    val err = runCatching { json.decodeFromString(ApiError.serializer(), text) }.getOrNull()
+                    throw ApiException(err?.error ?: "send_media_failed", resp.code)
+                }
             }
         }
 
     fun mediaUrl(name: String): String = "${root()}/v1/media/${enc(name)}"
+
+    /** PBX call history for the line's extension (UCP Call History permissions). */
+    suspend fun pbxCalls(token: String, did: String, limit: Int = 100): PbxCallsResponse = withContext(Dispatchers.IO) {
+        get(token, "/v1/lines/${enc(did)}/calls?limit=$limit", PbxCallsResponse.serializer())
+    }
+
+    /** One call recording (WAV). */
+    suspend fun recording(token: String, did: String, callId: String, download: Boolean = false): ByteArray =
+        withContext(Dispatchers.IO) {
+            bytes(token, "/v1/lines/${enc(did)}/calls/${enc(callId)}/recording" + if (download) "?download=1" else "")
+        }
+
+    /** Voicemail for the line's extension (UCP Voicemail permissions). New messages first. */
+    suspend fun voicemail(token: String, did: String, limit: Int = 100): VoicemailResponse = withContext(Dispatchers.IO) {
+        get(token, "/v1/lines/${enc(did)}/voicemail?limit=$limit", VoicemailResponse.serializer())
+    }
+
+    /** One voicemail's audio, always PCM WAV. */
+    suspend fun voicemailAudio(token: String, did: String, id: String, download: Boolean = false): ByteArray =
+        withContext(Dispatchers.IO) {
+            bytes(token, "/v1/lines/${enc(did)}/voicemail/${enc(id)}/audio" + if (download) "?download=1" else "")
+        }
+
+    suspend fun voicemailHeard(token: String, did: String, id: String): VoicemailCount = withContext(Dispatchers.IO) {
+        postEmpty(token, "/v1/lines/${enc(did)}/voicemail/${enc(id)}/heard", VoicemailCount.serializer())
+    }
+
+    /** Deletes a voicemail. Already gone (404) counts as done. */
+    suspend fun deleteVoicemail(token: String, did: String, id: String) = withContext(Dispatchers.IO) {
+        try {
+            delete(token, "/v1/lines/${enc(did)}/voicemail/${enc(id)}", VoicemailCount.serializer())
+        } catch (e: ApiException) {
+            if (e.httpCode != 404) throw e
+        }
+        Unit
+    }
+
+    private fun bytes(token: String, path: String): ByteArray {
+        val req = Request.Builder().url("${root()}$path").get().header(TOKEN_HEADER, token).build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                val text = resp.body?.string().orEmpty()
+                val err = runCatching { json.decodeFromString(ApiError.serializer(), text) }.getOrNull()
+                throw ApiException(err?.error ?: "media_failed", resp.code)
+            }
+            return resp.body?.bytes() ?: ByteArray(0)
+        }
+    }
 
     private fun <T> get(
         token: String,

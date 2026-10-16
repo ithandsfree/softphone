@@ -19,13 +19,16 @@ data class LineUi(
     val mmsEnabled: Boolean = true,
     val voiceEnabled: Boolean = true,
     val dndEnabled: Boolean = false,
+    /** No texting number yet: the line is listed under its extension (calls, voicemail and history work). */
+    val voiceOnly: Boolean = false,
 )
 
 fun SoftphoneAccount.toLineUi(index: Int): LineUi = LineUi(
     id = id,
-    label = label.ifBlank { umUsername },
+    label = displayName.ifBlank { umUsername },
     ext = sipExtension.ifBlank { umUsername },
-    did = did,
+    did = if (isVoiceOnly()) "" else did,
+    voiceOnly = isVoiceOnly(),
     colorSlot = if (index == 0) LineColorSlot.Emerald else LineColorSlot.Sky,
     smsEnabled = capSms,
     mmsEnabled = capMms,
@@ -93,3 +96,6 @@ object IhfThemeAccess {
     val motion: IhfMotion
         @Composable get() = LocalIhfMotion.current
 }
+
+/** True when the line has no texting number: the server lists it under the extension itself. */
+fun SoftphoneAccount.isVoiceOnly(): Boolean = did.isBlank() || (sipExtension.isNotBlank() && did == sipExtension)

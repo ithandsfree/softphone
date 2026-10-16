@@ -132,7 +132,7 @@ class SettingsShell(private val t: Tokens, private val onSection: (String) -> Un
         onSection(id)
     }
 
-    /** "● Business 9333" rows above the sections. */
+    /** "● Business 1001" rows above the sections. */
     fun lines(rows: List<Triple<String, String, Int>>) {
         lines.removeAll()
         rows.forEach { (label, ext, colorIndex) ->

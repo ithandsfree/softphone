@@ -1,5 +1,6 @@
 package net.ithandsfree.softphone.ui.components
 
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,11 +19,20 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import net.ithandsfree.softphone.data.formatDidForDisplay
 import net.ithandsfree.softphone.sip.SipCallSnapshot
+import net.ithandsfree.softphone.ui.formatLiveCallTimer
 import net.ithandsfree.softphone.ui.theme.IhfThemeAccess
 import net.ithandsfree.softphone.ui.theme.LocalIhfType
 
@@ -59,6 +69,27 @@ fun InCallBanner(
             color = c.caption,
         )
         Text(remote.ifBlank { "Unknown" }, style = type.title, color = c.text)
+        if (call.connectedAtElapsed > 0L && !call.incoming) {
+            var now by remember(call.connectedAtElapsed) {
+                mutableLongStateOf(SystemClock.elapsedRealtime())
+            }
+            LaunchedEffect(call.connectedAtElapsed) {
+                while (true) {
+                    now = SystemClock.elapsedRealtime()
+                    delay(1000)
+                }
+            }
+            val shown = formatLiveCallTimer(
+                ((now - call.connectedAtElapsed) / 1000L).toInt(),
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                shown,
+                style = type.timer,
+                color = c.gold,
+                modifier = Modifier.semantics { contentDescription = "Call time $shown" },
+            )
+        }
         Spacer(Modifier.height(12.dp))
         if (call.incoming) {
             Row(

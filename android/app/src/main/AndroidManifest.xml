@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -12,6 +13,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 14+: VoIP keep-alive (specialUse) and message check (remoteMessaging); neither has the 6 h/day cap
+         that Android 15+ puts on dataSync. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <!-- Required with phoneCall FGS on API 34+: else startForeground throws SecurityException
          and the process dies on cold start after a SIP line is enrolled (v0.3.5 crash). -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
@@ -67,13 +72,18 @@
         <service
             android:name=".notify.MessageSyncService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
-        <!-- dataSync (not phoneCall): API 34 phoneCall FGS requires ConnectionService
-             or the default-dialer role. Using phoneCall after enrol crashed v0.3.5/0.3.6. -->
+            android:foregroundServiceType="dataSync|remoteMessaging" />
+        <!-- dataSync keeps REGISTER alive. phoneCall is added only while a call is registered with Telecom
+             (TelecomBridge); without one, phoneCall at start crashed v0.3.5/0.3.6. -->
         <service
             android:name=".sip.SipRegistrationService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|phoneCall|specialUse">
+            <!-- Play / Android 14+ special-use justification for the always-on SIP registration. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VoIP: keeps the business phone line registered with the company PBX so incoming calls can ring" />
+        </service>
         <receiver
             android:name=".notify.MessageSyncBootReceiver"
             android:exported="true">
@@ -101,6 +111,21 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Phone-number links (Google Maps "Call", web pages, email): Android offers IHF Phone, which opens
+                 the keypad with the number. It never dials by itself and does not take over the default dialler. -->
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tel" />
+            </intent-filter>
+            <!-- "Call with IHF Phone" in the text-selection menu (long-press a number in email, SMS, WhatsApp). -->
+            <intent-filter android:label="@string/process_text_call">
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
             <!-- Enrol deep link: ihfphone://enroll/{token} -->
             <intent-filter>
@@ -140,5 +165,43 @@
                     android:scheme="https" />
             </intent-filter>
         </activity>
+
+        <!-- WorkManager runs the expedited message check as a foreground service on Android 11 and older:
+             it must be a dataSync service there (SmsPollWorker.getForegroundInfo). -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
+        <!-- Reply / Mark as read on message notifications (also used by Android Auto voice replies). -->
+        <receiver
+            android:name=".notify.MessageActionReceiver"
+            android:exported="false" />
+
+        <!-- Android Auto calling app: recents and voicemail on the car screen; calls run through Telecom. -->
+        <service
+            android:name=".car.IhfCarAppService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.CALLING" />
+            </intent-filter>
+        </service>
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="1" />
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+        <!-- Share / copy a picture from a conversation (ChatImageExport). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

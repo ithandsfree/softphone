@@ -15,6 +15,9 @@ class WelcomeMailer {
 	private $brandLine;
 	private $footerLine;
 	private $emblem;
+	/** Per-platform install links for the message being rendered (config install_android_url / install_windows_url). */
+	private $installAndroid = '';
+	private $installWindows = '';
 
 	public function __construct(
 		string $from = 'notify@pbx.example.com',
@@ -61,6 +64,8 @@ class WelcomeMailer {
 		$expires = (string)($payload['expires_iso'] ?? '');
 		$did = (string)($payload['did'] ?? '');
 		$extraLines = is_array($payload['extra_lines'] ?? null) ? $payload['extra_lines'] : [];
+		$this->installAndroid = trim((string)($payload['install_android'] ?? ''));
+		$this->installWindows = trim((string)($payload['install_windows'] ?? ''));
 
 		return [
 			'subject' => $this->fromName . " — Set up $label",
@@ -117,7 +122,19 @@ class WelcomeMailer {
 		}
 		$lines[] = '';
 		$lines[] = 'No password in this email.';
-		if ($install !== '') {
+		if ($this->installAndroid !== '' || $this->installWindows !== '') {
+			$lines[] = '';
+			$lines[] = 'Need the app first?';
+			if ($this->installAndroid !== '') {
+				$lines[] = 'Android: ' . $this->installAndroid;
+			}
+			if ($this->installWindows !== '') {
+				$lines[] = 'Windows: ' . $this->installWindows;
+			}
+			if ($install !== '' && $this->installAndroid !== '') {
+				$lines[] = 'Android app download (if Google Play does not offer it): ' . $install;
+			}
+		} elseif ($install !== '') {
 			$lines[] = '';
 			$lines[] = 'Need the app first?';
 			$lines[] = $install;
@@ -178,7 +195,16 @@ class WelcomeMailer {
 			? '<p style="margin:20px 0 0;font-size:14px;color:#aab6cc;">Other lines on this account</p>' . $extraHtml
 			: '';
 		$installBlock = '';
-		if ($this->httpsHref($install) !== '') {
+		if ($this->httpsHref($this->installAndroid) !== '' || $this->httpsHref($this->installWindows) !== '') {
+			// One button per platform; the direct Android download stays as a small fallback link.
+			$installBlock = '<p style="margin:24px 0 0;font-size:14px;color:#aab6cc;">Don\'t have the app yet?</p>'
+				. $this->button($this->installAndroid, 'Get it for Android', true)
+				. $this->button($this->installWindows, 'Get it for Windows', true);
+			if ($this->httpsHref($install) !== '' && $this->httpsHref($this->installAndroid) !== '') {
+				$installBlock .= '<p style="margin:4px 0 0;font-size:13px;color:#8491ad;">Google Play not offering it? '
+					. '<a href="' . $this->httpsHref($install) . '" style="color:#aab6cc;">Download the Android app directly</a>.</p>';
+			}
+		} elseif ($this->httpsHref($install) !== '') {
 			$installBlock = '<p style="margin:24px 0 0;font-size:14px;color:#aab6cc;">Don\'t have the app yet?</p>'
 				. $this->button($install, 'Get the app', true);
 		}
@@ -189,12 +215,23 @@ class WelcomeMailer {
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="color-scheme" content="dark"/>
+<meta name="supported-color-schemes" content="dark"/>
+<style>
+:root { color-scheme: dark; supported-color-schemes: dark; }
+/* Outlook app and Outlook.com dark mode: keep the brand colours instead of re-colouring them. */
+[data-ogsb] .ihf-page { background-color: #040914 !important; }
+[data-ogsb] .ihf-card { background-color: #0b132b !important; }
+[data-ogsb] .ihf-gold { background-color: #d4af37 !important; }
+[data-ogsc] .ihf-gold-text { color: #0b132b !important; }
+[data-ogsb] .ihf-ghost { background-color: #142040 !important; }
+</style>
 <title>{$name}</title>
 </head>
-<body style="margin:0;padding:0;background:#040914;">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#040914" style="background:#040914;">
+<body class="ihf-page" style="margin:0;padding:0;background-color:#040914;background-image:linear-gradient(#040914,#040914);">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#040914" class="ihf-page" style="background-color:#040914;background-image:linear-gradient(#040914,#040914);">
 <tr><td align="center" style="padding:28px 16px;">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#0b132b" style="max-width:520px;background:#0b132b;border-radius:18px;">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#0b132b" class="ihf-card" style="max-width:520px;background-color:#0b132b;background-image:linear-gradient(#0b132b,#0b132b);border-radius:18px;">
 <tr><td style="padding:28px 28px 12px;font-family:Segoe UI,Helvetica,Arial,sans-serif;">
 <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
 <td style="padding-right:12px;vertical-align:middle;">{$markHtml}</td>
@@ -206,7 +243,7 @@ class WelcomeMailer {
 <p style="margin:0 0 8px;font-size:16px;line-height:1.45;color:#aab6cc;">{$heading}</p>
 {$details}
 {$primary}
-<p style="margin:0;font-size:15px;line-height:1.45;color:#aab6cc;">Open this email and choose the gold button. On this PC it opens {$name}.</p>
+<p style="margin:0;font-size:15px;line-height:1.45;color:#aab6cc;">Open this email on the phone or PC where {$name} is installed and choose the gold button.</p>
 {$expiry}
 {$extraBlock}
 {$installBlock}
@@ -230,9 +267,13 @@ HTML;
 		$color = $secondary ? '#eef2f8' : '#0b132b';
 		$border = $secondary ? 'border:1px solid #233052;' : '';
 		$text = $this->h($label);
+		// Solid gradient as well as bgcolor: dark-mode mail apps (Outlook, Gmail on Android) re-colour background
+		// colours but leave background images alone, so the gold and navy stay true.
+		$fill = 'background-color:' . $bg . ';background-image:linear-gradient(' . $bg . ',' . $bg . ');';
+		$cls = $secondary ? 'ihf-ghost' : 'ihf-gold';
 		return '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0;">'
-			. '<tr><td bgcolor="' . $bg . '" style="border-radius:10px;' . $border . '">'
-			. '<a href="' . $href . '" style="display:inline-block;padding:14px 28px;font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;color:' . $color . ';text-decoration:none;font-weight:700;">'
+			. '<tr><td bgcolor="' . $bg . '" class="' . $cls . '" style="border-radius:10px;' . $fill . $border . '">'
+			. '<a href="' . $href . '" class="' . ($secondary ? '' : 'ihf-gold-text') . '" style="display:inline-block;padding:14px 28px;font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;color:' . $color . ';text-decoration:none;font-weight:700;border-radius:10px;' . $fill . '">'
 			. $text . '</a></td></tr></table>';
 	}
 

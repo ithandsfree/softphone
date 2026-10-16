@@ -90,6 +90,55 @@ class SmsGateway {
 		return null;
 	}
 
+	/** Extensions a User Management user owns: assigned devices plus the default extension. */
+	public function extensionsForUser(int $uid): array {
+		$exts = [];
+		try {
+			$um = \FreePBX::Userman();
+			$assigned = [];
+			if (method_exists($um, 'getAssignedDevices')) {
+				$assigned = $um->getAssignedDevices($uid) ?: [];
+			} elseif (method_exists($um, 'getUserExtensions')) {
+				$assigned = $um->getUserExtensions($uid) ?: [];
+			}
+			foreach ((array)$assigned as $key => $val) {
+				if (is_string($key) && ctype_digit($key)) {
+					$exts[] = $key;
+				} elseif ((is_string($val) || is_int($val)) && ctype_digit((string)$val)) {
+					$exts[] = (string)$val;
+				} elseif (is_array($val)) {
+					foreach (['default_extension', 'extension', 'ext'] as $k) {
+						if (!empty($val[$k]) && ctype_digit((string)$val[$k])) {
+							$exts[] = (string)$val[$k];
+						}
+					}
+				}
+			}
+			$user = $um->getUserByID($uid);
+			$def = (string)($user['default_extension'] ?? '');
+			if ($def !== '' && ctype_digit($def)) {
+				$exts[] = $def;
+			}
+		} catch (Throwable $e) {
+			// no extensions known
+		}
+		return array_values(array_unique($exts));
+	}
+
+	/**
+	 * Lines without a texting number are keyed by their extension ("voice-only lines"). True when [key] is one of
+	 * the user's own extensions (an extension is 2 to 6 digits; numbers are longer).
+	 */
+	public function isOwnExtension(int $uid, string $key): bool {
+		$key = self::normalizeDid($key);
+		return strlen($key) >= 2 && strlen($key) <= 6 && in_array($key, $this->extensionsForUser($uid), true);
+	}
+
+	/** A line the user may use for voice features: a texting number they own, or one of their extensions. */
+	public function userOwnsLine(int $uid, string $key): bool {
+		return $this->userOwnsDid($uid, $key) || $this->isOwnExtension($uid, $key);
+	}
+
 	/** FreePBX AstDB DND/<ext> = YES when Do Not Disturb is on. */
 	public function isDndActive(?string $extension): bool {
 		if ($extension === null || $extension === '') {
@@ -109,6 +158,9 @@ class SmsGateway {
 	 */
 	public function extensionForDid(int $uid, string $did): ?string {
 		$did = self::normalizeDid($did);
+		if ($did !== '' && $this->isOwnExtension($uid, $did) && !$this->userOwnsDid($uid, $did)) {
+			return $did; // voice-only line: the key is the extension itself
+		}
 		if ($did === '' || !$this->userOwnsDid($uid, $did)) {
 			return null;
 		}
@@ -312,6 +364,31 @@ class SmsGateway {
 				'WHERE direction = \'in\' AND `read` = 0 AND (' .
 				'(`from` = ? AND `to` = ?) OR (`from` = ? AND `to` = ?)' .
 				')';
+			$stmt = $db->prepare($sql);
+			$stmt->execute([$peer, $did, $did, $peer]);
+			return (int)$stmt->rowCount();
+		} catch (Throwable $e) {
+			return 0;
+		}
+	}
+
+	/**
+	 * Mark a conversation unread: the newest inbound message goes back to unread, so the thread counts 1 unread
+	 * (UCP shows it unread too). Returns 0 when the conversation has no inbound message.
+	 */
+	public function markThreadUnread(int $uid, string $did, string $peer): int
+	{
+		$did = self::normalizeDid($did);
+		$peer = self::normalizeDid($peer);
+		if ($did === '' || $peer === '') {
+			return 0;
+		}
+		try {
+			$db = \FreePBX::Database();
+			$sql = 'UPDATE sms_messages SET `read` = 0 ' .
+				'WHERE direction = \'in\' AND (' .
+				'(`from` = ? AND `to` = ?) OR (`from` = ? AND `to` = ?)' .
+				') ORDER BY tx_rx_datetime DESC, id DESC LIMIT 1';
 			$stmt = $db->prepare($sql);
 			$stmt->execute([$peer, $did, $did, $peer]);
 			return (int)$stmt->rowCount();
@@ -579,6 +656,11 @@ class SmsGateway {
 				'media' => $media,
 			];
 		}
+		// Oldest first by the message's own time, not by row id: history imported later (for example recovered
+		// from an older PBX) gets higher ids and would otherwise list after today's messages.
+		usort($out, static function (array $a, array $b): int {
+			return [(string)($a['datetime'] ?? ''), $a['id']] <=> [(string)($b['datetime'] ?? ''), $b['id']];
+		});
 		return $out;
 	}
 

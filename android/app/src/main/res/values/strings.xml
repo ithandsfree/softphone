@@ -6,6 +6,7 @@
     <string name="sip_reg_body">Keeping softphone registered for calls</string>
     <string name="incoming_call_title">Incoming call</string>
     <string name="incoming_call_answer">Answer</string>
+    <string name="process_text_call">Call with IHF Phone</string>
     <string name="incoming_call_decline">Decline</string>
     <string name="sip_fgs_failed_snack">Could not keep voice registered in the background. Check app settings (notifications / battery).</string>
     <string name="sip_fgs_failed_action">Settings</string>

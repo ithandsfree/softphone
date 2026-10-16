@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -64,6 +65,7 @@ import net.ithandsfree.softphone.data.ChatMessage
 import net.ithandsfree.softphone.data.SoftphoneAccount
 import net.ithandsfree.softphone.ui.SoftphoneViewModel
 import net.ithandsfree.softphone.ui.components.NumberText
+import net.ithandsfree.softphone.ui.components.PictureActions
 import net.ithandsfree.softphone.ui.components.ZoomableImageViewer
 import net.ithandsfree.softphone.ui.theme.IhfThemeAccess
 import net.ithandsfree.softphone.ui.theme.LocalIhfType
@@ -94,7 +96,11 @@ fun ChatScreen(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri -> attachUri = uri }
 
-    LaunchedEffect(accountId, peer) {
+    LaunchedEffect(accountId, peer, account?.label) {
+        val lineLabel = account?.label.orEmpty()
+        if (lineLabel.isNotBlank()) {
+            net.ithandsfree.softphone.notify.MessageNotifier.cancelThread(context, lineLabel, peer)
+        }
         vm.loadMessages(accountId, peer)
         // Opening the thread marks FreePBX messages read — refresh tab badge soon.
         (context.applicationContext as? net.ithandsfree.softphone.SoftphoneApp)
@@ -127,6 +133,9 @@ fun ChatScreen(
                 NumberText(peer, color = c.text)
                 Text(account?.label ?: "", style = type.caption, color = c.caption)
             }
+            IconButton(onClick = { vm.placeCall(accountId, peer, vm.resolveContactName(peer)) }) {
+                Icon(Icons.Default.Call, contentDescription = "Call", tint = c.gold)
+            }
             IconButton(onClick = { vm.loadMessages(accountId, peer) }) {
                 Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = c.muted)
             }
@@ -135,6 +144,22 @@ fun ChatScreen(
                     Icon(Icons.Default.MoreVert, contentDescription = "Conversation actions", tint = c.muted)
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Call") },
+                        onClick = {
+                            menuOpen = false
+                            vm.placeCall(accountId, peer, vm.resolveContactName(peer))
+                        },
+                    )
+                    // An open conversation is read (opening it marks it read), so only "unread" applies here.
+                    // Back to the inbox afterwards: staying would mark it read again on the next refresh.
+                    DropdownMenuItem(
+                        text = { Text("Mark as unread") },
+                        onClick = {
+                            menuOpen = false
+                            vm.setThreadRead(accountId, peer, read = false, onDone = onBack)
+                        },
+                    )
                     DropdownMenuItem(
                         text = { Text("Delete conversation") },
                         onClick = {
@@ -159,20 +184,7 @@ fun ChatScreen(
                     Text("Couldn't send", style = type.label, color = c.text)
                     Text(err, style = type.caption, color = c.muted)
                 }
-                Text(
-                    "Retry",
-                    color = c.gold,
-                    style = type.label,
-                    modifier = Modifier
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(c.raised)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .then(
-                            Modifier,
-                        ),
-                )
-                // clickable retry via IconButton pattern
+                // One Retry (the decorative second "Retry" label was removed: it did nothing when tapped).
                 androidx.compose.material3.TextButton(onClick = {
                     val body = lastFailedBody ?: draft
                     if (attachUri != null) {
@@ -374,6 +386,7 @@ private fun MessageBubble(
     // gesture-blocked by SelectionContainer or bubble combinedClickable.
     var zoomRequest by remember { mutableStateOf<ImageRequest?>(null) }
     var zoomDescription by remember { mutableStateOf<String?>(null) }
+    var zoomSource by remember { mutableStateOf<ZoomSource?>(null) }
 
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = align) {
         Column(
@@ -457,6 +470,7 @@ private fun MessageBubble(
                                         Modifier.clickable {
                                             zoomRequest = request
                                             zoomDescription = label
+                                            zoomSource = ZoomSource(absolute, headers, mediaName.ifBlank { "picture" })
                                         }
                                     } else {
                                         Modifier
@@ -488,13 +502,19 @@ private fun MessageBubble(
     }
 
     zoomRequest?.let { model ->
+        val source = zoomSource
         ZoomableImageViewer(
             model = model,
             contentDescription = zoomDescription,
             onDismiss = {
                 zoomRequest = null
                 zoomDescription = null
+                zoomSource = null
             },
+            pictureActions = source?.let { PictureActions(it.url, it.header, it.name) },
         )
     }
 }
+
+/** Where the enlarged picture came from, so it can be downloaded again for Save / Share / Copy. */
+private data class ZoomSource(val url: String, val header: Pair<String, String>?, val name: String)

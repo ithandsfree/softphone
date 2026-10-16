@@ -197,6 +197,7 @@ function admin_route(string $method, string $path, array $config, AdminService $
 		&& $path !== '/v1/admin/assignments'
 		&& $path !== '/v1/admin/assign'
 		&& $path !== '/v1/admin/welcome-email'
+		&& $path !== '/v1/admin/remove'
 		&& $path !== '/admin/catalog'
 		&& $path !== '/admin/assignments'
 		&& $path !== '/admin/assign'
@@ -224,6 +225,11 @@ function admin_route(string $method, string $path, array $config, AdminService $
 		$email = isset($body['email']) ? (string)$body['email'] : null;
 		$result = $admin->resendWelcome($ext, $email);
 		Response::json(!empty($result['ok']) ? 200 : 400, $result);
+	}
+	if ($method === 'POST' && $path === '/v1/admin/remove') {
+		$body = Response::jsonBody();
+		$result = $admin->removeAssignment((string)($body['extension'] ?? ''), !empty($body['sign_out_devices']));
+		Response::json(!empty($result['ok']) ? 200 : 404, $result);
 	}
 
 	Response::json(405, ['error' => 'method_not_allowed', 'path' => $path]);
@@ -367,6 +373,16 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 		Response::json(200, ['ok' => true, 'marked' => $n]);
 	}
 
+	if ($method === 'POST' && preg_match('#^/v1/lines/([^/]+)/threads/([^/]+)/unread$#', $path, $m)) {
+		$did = SmsGateway::normalizeDid(urldecode($m[1]));
+		$peer = SmsGateway::normalizeDid(urldecode($m[2]));
+		if (!$sms->userOwnsDid($uid, $did)) {
+			Response::json(403, ['error' => 'did_not_assigned']);
+		}
+		$n = $sms->markThreadUnread($uid, $did, $peer);
+		Response::json(200, ['ok' => true, 'marked' => $n]);
+	}
+
 	// Mark all inbound unread for the current DID (Messages inbox line).
 	if ($method === 'POST' && preg_match('#^/v1/lines/([^/]+)/read-all$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
@@ -380,7 +396,7 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 	// FreePBX Do Not Disturb (AstDB DND/<ext> + Custom:DND device state).
 	if ($method === 'GET' && preg_match('#^/v1/lines/([^/]+)/dnd$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
-		if (!$sms->userOwnsDid($uid, $did)) {
+		if (!$sms->userOwnsLine($uid, $did)) {
 			Response::json(403, ['error' => 'did_not_assigned']);
 		}
 		$ext = $sms->extensionForDid($uid, $did);
@@ -393,7 +409,7 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 
 	if (($method === 'PUT' || $method === 'POST') && preg_match('#^/v1/lines/([^/]+)/dnd$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
-		if (!$sms->userOwnsDid($uid, $did)) {
+		if (!$sms->userOwnsLine($uid, $did)) {
 			Response::json(403, ['error' => 'did_not_assigned']);
 		}
 		$body = Response::jsonBody();
@@ -423,7 +439,7 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 	// Never include secrets in SMS / enrol landing pages.
 	if ($method === 'GET' && preg_match('#^/v1/lines/([^/]+)/sip-credentials$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
-		if (!$sms->userOwnsDid($uid, $did)) {
+		if (!$sms->userOwnsLine($uid, $did)) {
 			Response::json(403, ['error' => 'did_not_assigned']);
 		}
 		$creds = $sms->sipCredentialsForDid($uid, $did);
@@ -503,7 +519,7 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 	// PBX call history for the line's extension, with UCP's Call History permissions.
 	if ($method === 'GET' && preg_match('#^/v1/lines/([^/]+)/calls$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
-		if (!$sms->userOwnsDid($uid, $did)) {
+		if (!$sms->userOwnsLine($uid, $did)) {
 			Response::json(403, ['error' => 'did_not_assigned']);
 		}
 		$ext = (string)$sms->extensionForDid($uid, $did);
@@ -518,7 +534,7 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 
 	if ($method === 'GET' && preg_match('#^/v1/lines/([^/]+)/calls/([0-9]+[._][0-9]+)/recording$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
-		if (!$sms->userOwnsDid($uid, $did)) {
+		if (!$sms->userOwnsLine($uid, $did)) {
 			Response::json(403, ['error' => 'did_not_assigned']);
 		}
 		$ext = (string)$sms->extensionForDid($uid, $did);
@@ -538,7 +554,7 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 	// Voicemail for the line's extension, with UCP's Voicemail permissions.
 	if (preg_match('#^/v1/lines/([^/]+)/voicemail(?:/(count)|/([A-Za-z0-9_.-]{1,80})(?:/(audio|heard))?)?$#', $path, $m)) {
 		$did = SmsGateway::normalizeDid(urldecode($m[1]));
-		if (!$sms->userOwnsDid($uid, $did)) {
+		if (!$sms->userOwnsLine($uid, $did)) {
 			Response::json(403, ['error' => 'did_not_assigned']);
 		}
 		$ext = (string)$sms->extensionForDid($uid, $did);
@@ -590,13 +606,41 @@ function route(string $method, string $path, array $config, SmsGateway $sms, Tok
 
 function enrich_lines(array $config, SmsGateway $sms, int $uid): array {
 	$raw = $sms->didsForUser($uid);
-	return Entitlements::enrichLines(
+	// Voice-only lines: the user's extensions that have no texting number are listed under the extension itself
+	// ("did" = extension, voice_only = true, texting off), so calls, voicemail, history and DND work without SMS.
+	// When a texting number is linked later, that extension is listed under the number instead. Added only when
+	// every number's extension is known, so a user is never shown the same extension twice.
+	$covered = [];
+	$allKnown = true;
+	foreach ($raw as $row) {
+		if (empty($row['extension'])) {
+			$allKnown = false;
+		} else {
+			$covered[(string)$row['extension']] = true;
+		}
+	}
+	if ($allKnown) {
+		foreach ($sms->extensionsForUser($uid) as $ext) {
+			if (!isset($covered[$ext])) {
+				$raw[] = ['id' => $ext, 'did' => $ext, 'e164' => null, 'extension' => $ext, 'voice_only' => true];
+			}
+		}
+	}
+	$lines = Entitlements::enrichLines(
 		$config,
 		$raw,
 		function (?string $did, ?string $ext) use ($sms): bool {
 			return $sms->isDndActive($ext);
 		}
 	);
+	foreach ($lines as &$line) {
+		if (!empty($line['voice_only'])) {
+			$line['capabilities']['sms'] = false;
+			$line['capabilities']['mms'] = false;
+		}
+	}
+	unset($line);
+	return $lines;
 }
 
 function capability_for_did(array $config, SmsGateway $sms, int $uid, string $did): array {

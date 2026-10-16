@@ -24,9 +24,11 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,6 +50,10 @@ import net.ithandsfree.softphone.R
 import net.ithandsfree.softphone.legal.LegalLinks
 import net.ithandsfree.softphone.SoftphoneApp
 import net.ithandsfree.softphone.data.AccountStore
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import net.ithandsfree.softphone.notify.FullScreenAlerts
 import net.ithandsfree.softphone.notify.MessageSyncService
 import net.ithandsfree.softphone.notify.SmsPollWorker
 import net.ithandsfree.softphone.data.CallHistoryStore
@@ -59,7 +65,11 @@ import net.ithandsfree.softphone.data.SkinPrefs
 import net.ithandsfree.softphone.data.normalizeEnrolToken
 import net.ithandsfree.softphone.sip.SipEngine
 import net.ithandsfree.softphone.sip.SipRegistrationService
-import net.ithandsfree.softphone.ui.components.InCallBanner
+import net.ithandsfree.softphone.data.formatDidForDisplay
+import net.ithandsfree.softphone.ui.screens.InCallActions
+import net.ithandsfree.softphone.ui.screens.InCallLines
+import net.ithandsfree.softphone.ui.screens.InCallScreen
+import net.ithandsfree.softphone.ui.screens.ReturnToCallBar
 import net.ithandsfree.softphone.ui.components.SecretTextField
 import net.ithandsfree.softphone.ui.components.SoftphoneBottomBar
 import net.ithandsfree.softphone.ui.components.SoftphoneTab
@@ -86,6 +96,20 @@ import net.ithandsfree.softphone.ui.screens.WelcomeScreen
 import net.ithandsfree.softphone.ui.theme.IhfThemeAccess
 import java.io.File
 
+/**
+ * Switch bottom tab the one way: back to the Messages root (saving the tab being left), then the tab. [restore]
+ * brings back where the person was inside that tab (bottom bar taps). Calls opened by a call starting or ending use
+ * the same switch without restoring. Until 0.4.25 those pushed Calls on top of the open tab, so Settings and Calls
+ * were saved as one stack: after a call taken while on Settings, the Settings tab showed Calls again.
+ */
+internal fun androidx.navigation.NavController.openTab(route: String, restore: Boolean) {
+    navigate(route) {
+        popUpTo("app/messages") { saveState = true }
+        launchSingleTop = true
+        restoreState = restore
+    }
+}
+
 @Composable
 fun SoftphoneNav(
     store: AccountStore,
@@ -100,6 +124,8 @@ fun SoftphoneNav(
     deepLinkEnrolToken: String? = null,
     deepLinkDemoSeed: Uri? = null,
     openMessagesPeer: String? = null,
+    dialNumber: String? = null,
+    onDialNumberConsumed: () -> Unit = {},
     onOpenMessagesPeerConsumed: () -> Unit = {},
     forceShowIncoming: Boolean = false,
     onIncomingUiShown: () -> Unit = {},
@@ -115,6 +141,7 @@ fun SoftphoneNav(
             callHistory,
             sipEngine,
             cacheDir,
+            (androidx.compose.ui.platform.LocalContext.current.applicationContext as? net.ithandsfree.softphone.SoftphoneApp)?.telecom,
         ),
     )
     val state by vm.state.collectAsState()
@@ -160,6 +187,16 @@ fun SoftphoneNav(
         if (granted) {
             MessageSyncService.reconcile(context)
             SipRegistrationService.reconcile(context)
+        }
+    }
+    // A call failed because the microphone could not be opened: ask for the permission again (Android shows nothing
+    // when it was denied for good; the call's note then says where to allow it).
+    LaunchedEffect(state.micPermissionNeeded) {
+        if (state.micPermissionNeeded) {
+            vm.micPermissionAsked()
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!granted) micPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
     val sipFgsFailedMsg = stringResource(R.string.sip_fgs_failed_snack)
@@ -231,21 +268,26 @@ fun SoftphoneNav(
         if (state.call.active) {
             callWasActive = true
             vm.markSplashDone()
-            nav.navigate("app/calls") {
-                launchSingleTop = true
-            }
+            nav.openTab("app/calls", restore = false)
         } else if (callWasActive) {
             callWasActive = false
             callsTab = CallsSubTab.Keypad
             if (!route.contains("chat/") && !route.contains("compose/")) {
-                nav.navigate("app/calls") {
-                    popUpTo("app/calls") { inclusive = true }
-                    launchSingleTop = true
-                }
+                nav.openTab("app/calls", restore = false)
             }
             // Locked-screen calls return to the keyguard. Unlocked calls stay.
             onCallSessionEnded()
         }
+    }
+
+    // A number from another app (Google Maps "Call", a tel: link): open the keypad with it. Never dials by itself.
+    LaunchedEffect(dialNumber, state.splashDone) {
+        val number = dialNumber ?: return@LaunchedEffect
+        if (!state.splashDone || state.accounts.isEmpty()) return@LaunchedEffect
+        vm.prefillDial(number)
+        callsTab = CallsSubTab.Keypad
+        nav.openTab("app/calls", restore = false)
+        onDialNumberConsumed()
     }
 
     // Second-line (and later) HTTPS / ihfphone enrol while a line is already enrolled.
@@ -277,8 +319,10 @@ fun SoftphoneNav(
 
     LaunchedEffect(state.status) {
         state.status?.let {
-            snack.showSnackbar(it)
+            // No pop-up notices over a conversation or a new message: they cover the reply box while typing.
+            val typing = route.contains("chat") || route.contains("compose")
             vm.clearStatus()
+            if (!typing) snack.showSnackbar(it)
         }
     }
 
@@ -293,6 +337,22 @@ fun SoftphoneNav(
                 vm.clearError()
             }
         }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumeTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    var askFullScreen by rememberSaveable { mutableStateOf(false) }
+    var skippedFullScreen by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(state.splashDone, route, resumeTick) {
+        if (!state.splashDone || skippedFullScreen || !route.startsWith("app/")) return@LaunchedEffect
+        askFullScreen = !FullScreenAlerts.granted(context)
     }
 
     val showBottomBar = route.startsWith("app/") &&
@@ -310,6 +370,45 @@ fun SoftphoneNav(
         else -> SoftphoneTab.Messages
     }
 
+    // In-call screen: full screen while a call is up, unless minimised to browse the app.
+    var callMinimized by remember { mutableStateOf(false) }
+    LaunchedEffect(state.call.active, state.call.incoming, state.call.waiting?.ringing) {
+        // A new call, a ringing call, or a second call ringing always brings the call screen back.
+        if (!state.call.active || state.call.incoming || state.call.waiting?.ringing == true) callMinimized = false
+    }
+    val inCallLines = InCallLines(
+        label = { id -> state.accounts.firstOrNull { it.id == id }?.displayName ?: "Line" },
+        number = { id ->
+            state.accounts.firstOrNull { it.id == id }?.did?.takeIf { it.isNotBlank() }?.let { formatDidForDisplay(it) }
+        },
+        colorIndex = { id -> state.accounts.indexOfFirst { it.id == id }.coerceAtLeast(0) },
+        contactName = { number -> vm.resolveContactName(number).ifBlank { null } },
+        extension = vm.callExtension(),
+    )
+    val inCallActions = remember(vm) {
+        object : InCallActions {
+            override fun answer() = vm.answerCall()
+            override fun decline() = vm.declineCall()
+            override fun hangup() = vm.hangupCall()
+            override fun toggleMute() = vm.toggleMute()
+            override fun toggleHold() = vm.toggleHold()
+            override fun toggleSpeaker() = vm.toggleSpeakerphone()
+            override fun dtmf(digit: Char) = vm.sendDtmf(digit.toString())
+            override fun route(endpoint: androidx.core.telecom.CallEndpointCompat) = vm.routeAudio(endpoint)
+            override fun transfer(destination: String) = vm.transferCall(destination)
+            override fun consultTransfer(destination: String) = vm.consultTransfer(destination)
+            override fun completeTransfer() = vm.completeTransfer()
+            override fun cancelTransfer() = vm.cancelTransfer()
+            override fun sendToOtherDevices() = vm.sendToOtherDevices()
+            override fun answerWaiting() = vm.answerWaiting()
+            override fun endWaiting() = vm.endWaiting()
+            override fun swap() = vm.swapCalls()
+            override fun minimize() {
+                callMinimized = true
+            }
+        }
+    }
+
     Scaffold(
         containerColor = c.ground,
         snackbarHost = { SnackbarHost(snack) },
@@ -325,11 +424,7 @@ fun SoftphoneNav(
                         SoftphoneTab.Lines -> "app/lines"
                         SoftphoneTab.Settings -> "app/settings"
                     }
-                    nav.navigate(dest) {
-                        popUpTo("app/messages") { saveState = true }
-                        launchSingleTop = true
-                        restoreState = true
-                    }
+                    nav.openTab(dest, restore = true)
                 }
             }
         },
@@ -343,14 +438,8 @@ fun SoftphoneNav(
                 .consumeWindowInsets(pad)
                 .background(c.ground),
         ) {
-            if (state.call.active) {
-                InCallBanner(
-                    call = state.call,
-                    onHangup = vm::hangupCall,
-                    onAnswer = vm::answerCall,
-                    onDecline = vm::declineCall,
-                    onToggleSpeaker = vm::toggleSpeakerphone,
-                )
+            if (state.call.active && callMinimized) {
+                ReturnToCallBar(state.call, inCallLines) { callMinimized = false }
             }
             Box(
                 Modifier
@@ -560,6 +649,7 @@ fun SoftphoneNav(
                         tab = callsTab,
                         onTabChange = { callsTab = it },
                         onOpenCallDetail = { id -> nav.navigate("app/calls/call/$id") },
+                        onMessage = { accountId, number -> nav.navigate("app/messages/compose/$accountId?to=$number") },
                         onOpenContact = { id -> nav.navigate("app/calls/contact/$id") },
                     )
                 }
@@ -656,6 +746,16 @@ fun SoftphoneNav(
         }
     }
 
+    // Full-screen call (point C): covers the app and the bottom bar; minimise shows the "Return to call" bar.
+    if (state.call.active && !callMinimized) {
+        InCallScreen(
+            call = state.call,
+            audio = state.audio,
+            lines = inCallLines,
+            actions = inCallActions,
+        )
+    }
+
     state.pendingSipSecretAccountId?.let { pendingSipId ->
         SipSecretPromptDialog(
             accountId = pendingSipId,
@@ -664,6 +764,69 @@ fun SoftphoneNav(
             onSave = { ext, secret -> vm.saveSipCredentials(pendingSipId, ext, secret) },
             onSync = { vm.syncSipCredentials(pendingSipId) },
             onDismiss = { vm.dismissSipSecretPrompt() },
+        )
+    }
+
+    // After a crash (or a start-up problem the app recovered from), offer to send the report once.
+    val crashContext = androidx.compose.ui.platform.LocalContext.current
+    var crashReport by remember { mutableStateOf(net.ithandsfree.softphone.diag.CrashLog.read(crashContext)) }
+    if (crashReport != null) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("IHF Phone had a problem last time") },
+            text = {
+                Text(
+                    "Send the report to IT Hands Free so we can fix it? It holds the app version, the phone model " +
+                        "and the error only: no messages, numbers or passwords.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    net.ithandsfree.softphone.diag.CrashLog.shareIntent(crashContext)?.let { runCatching { crashContext.startActivity(it) } }
+                    net.ithandsfree.softphone.diag.CrashLog.clear(crashContext)
+                    crashReport = null
+                }) { Text("Send report") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    net.ithandsfree.softphone.diag.CrashLog.clear(crashContext)
+                    crashReport = null
+                }) { Text("Not now") }
+            },
+        )
+    }
+
+    if (askFullScreen) {
+        AlertDialog(
+            onDismissRequest = {
+                askFullScreen = false
+                skippedFullScreen = true
+            },
+            title = { Text("Full screen alerts") },
+            text = {
+                Text(
+                    "Samsung turns this off for IHF Phone after each update. " +
+                        "Lock-screen calls and messages stay hidden until the switch is on.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    askFullScreen = false
+                    runCatching {
+                        context.startActivity(
+                            FullScreenAlerts.settingsIntent(context).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            },
+                        )
+                    }
+                }) { Text("Open the switch") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    askFullScreen = false
+                    skippedFullScreen = true
+                }) { Text("Not now") }
+            },
         )
     }
 }

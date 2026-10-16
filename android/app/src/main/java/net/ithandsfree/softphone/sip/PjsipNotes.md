@@ -15,7 +15,7 @@ This softphone is **GPL-2.0**. PJSIP is GPL (with a separate commercial license 
    The `community` flavor leaves the domain blank until the user enters it.
 4. **SIP TLS** on port **5061**, with the PBX certificate checked against the
    Android system CAs. TCP is created as well and used only when the TLS
-   transport cannot be created. UDP is the last resort.
+   transport cannot be created. UDP signalling is not used.
 
 ## FreePBX checklist
 

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android Auto: templated calling screens (Car App Library) and message notifications read aloud. -->
+<automotiveApp>
+    <uses name="template" />
+    <uses name="notification" />
+</automotiveApp>

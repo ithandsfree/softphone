@@ -3,6 +3,11 @@ package net.ithandsfree.softphone.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.ui.res.stringResource
+import net.ithandsfree.softphone.R
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,9 +34,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +49,7 @@ import net.ithandsfree.softphone.BuildConfig
 import net.ithandsfree.softphone.data.KeypadPrefs
 import net.ithandsfree.softphone.legal.LegalLinks
 import net.ithandsfree.softphone.data.SkinPrefs
+import net.ithandsfree.softphone.notify.FullScreenAlerts
 import net.ithandsfree.softphone.notify.NotifyPrefs
 import net.ithandsfree.softphone.ui.SoftphoneViewModel
 import net.ithandsfree.softphone.ui.theme.IbmPlexMonoFamily
@@ -68,6 +77,8 @@ fun SettingsScreen(
     val vibeOn by keypadPrefs.vibrateEnabled.collectAsState()
     val messageSyncOn by notifyPrefs.messageSyncEnabled.collectAsState()
     val sipKeepAliveOn by notifyPrefs.sipKeepAliveEnabled.collectAsState()
+    val context = LocalContext.current
+    val fullScreenOn = rememberFullScreenAlertsGranted()
     val c = IhfThemeAccess.colors
     val type = LocalIhfType.current
 
@@ -114,6 +125,21 @@ fun SettingsScreen(
             color = c.caption,
             modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
         )
+        if (FullScreenAlerts.applies()) {
+            SettingsRow(
+                title = "Full screen alerts",
+                subtitle = if (fullScreenOn) {
+                    "On. An update can turn this off again."
+                } else {
+                    "Off. Lock-screen calls and messages need this."
+                },
+                onClick = {
+                    runCatching {
+                        context.startActivity(FullScreenAlerts.settingsIntent(context))
+                    }
+                },
+            )
+        }
         Spacer(Modifier.height(16.dp))
         Text("KEYPAD", style = type.overline, color = c.caption)
         SettingsToggleRow(
@@ -152,7 +178,7 @@ fun SettingsScreen(
         Spacer(Modifier.height(16.dp))
         Text("LINES", style = type.overline, color = c.caption)
         state.lines.forEach { line ->
-            SettingsRow(line.label, "Ringtone & messaging") { onOpenLine(line.id) }
+            SettingsRow(line.label, "Name, ringtone & messaging") { onOpenLine(line.id) }
         }
         if (state.lines.size < 2) {
             SettingsRow("Enrol another line", "Deep link or UM login", onEnrol)
@@ -160,7 +186,7 @@ fun SettingsScreen(
         Spacer(Modifier.height(16.dp))
         Text("ADVANCED", style = type.overline, color = c.caption)
         SettingsRow("SIP status", state.sipSummary.ifBlank { "PJSIP — not configured" })
-        SettingsRow("API", "Softphone BFF")
+        SettingsRow("Server", serverSummary(state.accounts.firstOrNull { it.id == state.activeLineId }?.apiBaseUrl))
         if (state.call.active) {
             SettingsRow(
                 "Active call",
@@ -169,6 +195,10 @@ fun SettingsScreen(
         }
         Spacer(Modifier.height(16.dp))
         Text("ABOUT", style = type.overline, color = c.caption)
+        SettingsRow(
+            title = stringResource(R.string.app_name),
+            subtitle = "Version ${appVersionLabel()} · build ${BuildConfig.VERSION_CODE}",
+        )
         if (onOpenPrivacy != null) {
             SettingsRow(
                 title = "Privacy",
@@ -182,6 +212,17 @@ fun SettingsScreen(
             onClick = onOpenLicences,
         )
     }
+}
+
+/** "0.4.0 Beta 1", or just the version name for a final release. */
+fun appVersionLabel(): String =
+    listOf(BuildConfig.VERSION_NAME, BuildConfig.RELEASE_LABEL).filter { it.isNotBlank() }.joinToString(" ")
+
+/** The BFF host the active line talks to, without the path. */
+private fun serverSummary(apiBaseUrl: String?): String {
+    val base = apiBaseUrl?.ifBlank { null } ?: BuildConfig.DEFAULT_API_BASE
+    return runCatching { Uri.parse(base).let { u -> u.host + (if (u.port > 0) ":${u.port}" else "") } }
+        .getOrNull()?.ifBlank { null } ?: base
 }
 
 fun openLegalUrl(context: Context, url: String) {
@@ -274,7 +315,7 @@ fun LicencesScreen(
             Text("Licences", style = type.titleSm, color = c.text)
         }
         Text(
-            "Version ${BuildConfig.VERSION_NAME}",
+            "Version ${appVersionLabel()}",
             style = type.caption,
             color = c.caption,
         )
@@ -449,4 +490,21 @@ private fun SettingsToggleRow(
             ),
         )
     }
+}
+
+@Composable
+private fun rememberFullScreenAlertsGranted(): Boolean {
+    val context = LocalContext.current
+    var granted by remember { mutableStateOf(FullScreenAlerts.granted(context)) }
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                granted = FullScreenAlerts.granted(context)
+            }
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    return granted
 }

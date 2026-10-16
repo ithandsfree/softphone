@@ -50,6 +50,11 @@ return [
 	'public_base' => 'https://pbx.example.com/ihf-softphone',
 	// Optional override; when empty, admin picks the newest /dl/<token>/ drop.
 	'install_url' => '',
+	// Optional per-platform install buttons in the welcome email and setup page (https only). When set, they
+	// replace the single "Get the app" button; install_url above stays as the "download directly" fallback.
+	// Android: your Play listing or Play testing opt-in link. Windows: where you host the .msi installer.
+	'install_android_url' => '',
+	'install_windows_url' => '',
 	/**
 	 * Envelope From for welcome / request-enrol mail. Use an address your PBX
 	 * is allowed to send (SPF/DKIM). Example only — replace before production.

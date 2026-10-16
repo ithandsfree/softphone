@@ -43,7 +43,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import net.ithandsfree.softphone.data.ThreadInfo
+import net.ithandsfree.softphone.notify.MessageNotifier
 import net.ithandsfree.softphone.data.formatPeerForDisplay
 import net.ithandsfree.softphone.ui.SoftphoneViewModel
 import net.ithandsfree.softphone.ui.components.EmptyState
@@ -64,8 +66,10 @@ fun MessagesScreen(
     // Viewing line is independent of the default/outbound extension.
     val viewId = state.messagesLineId
     val viewLine = state.lines.firstOrNull { it.id == viewId }
+    val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<ThreadInfo?>(null) }
+    var pendingActions by remember { mutableStateOf<ThreadInfo?>(null) }
 
     LaunchedEffect(viewId) {
         if (!viewId.isNullOrBlank()) vm.loadThreads(viewId)
@@ -113,6 +117,7 @@ fun MessagesScreen(
                         text = { Text("Mark this line read") },
                         onClick = {
                             menuOpen = false
+                            viewLine?.label?.let { MessageNotifier.cancelLine(context, it) }
                             vm.markAllRead(allLines = false)
                         },
                         enabled = viewId != null,
@@ -121,6 +126,7 @@ fun MessagesScreen(
                         text = { Text("Mark all lines read") },
                         onClick = {
                             menuOpen = false
+                            MessageNotifier.cancelAll(context)
                             vm.markAllRead(allLines = true)
                         },
                         enabled = state.accounts.isNotEmpty(),
@@ -138,6 +144,11 @@ fun MessagesScreen(
             viewLine == null -> EmptyState(
                 title = "No line selected",
                 body = "Enrol an extension to see SMS threads.",
+            )
+            viewLine.voiceOnly -> EmptyState(
+                title = "No texting number on this line",
+                body = "Calls, voicemail and call history work. When your administrator adds a texting number to " +
+                    "extension ${viewLine.ext}, messages appear here by themselves.",
             )
             !viewLine.smsEnabled -> EmptyState(
                 title = "SMS is off for this line",
@@ -173,7 +184,7 @@ fun MessagesScreen(
                             c = c,
                             type = type,
                             onOpen = { viewId?.let { onOpenChat(it, thread.peer) } },
-                            onLongPress = { pendingDelete = thread },
+                            onLongPress = { pendingActions = thread },
                         )
                     }
                 }
@@ -189,6 +200,46 @@ fun MessagesScreen(
                 }
             }
         }
+    }
+
+    // Press and hold a conversation: Call, Mark as read / unread, Delete.
+    pendingActions?.let { thread ->
+        val title = vm.resolveContactName(thread.peer)
+            .ifBlank { formatPeerForDisplay(thread.peer) }
+        val id = viewId
+        AlertDialog(
+            onDismissRequest = { pendingActions = null },
+            title = { Text(title) },
+            text = {
+                Column {
+                    ThreadAction("Call") {
+                        pendingActions = null
+                        if (id != null) vm.placeCall(id, thread.peer, vm.resolveContactName(thread.peer))
+                    }
+                    if (thread.unread > 0) {
+                        ThreadAction("Mark as read") {
+                            pendingActions = null
+                            if (id != null) {
+                                viewLine?.label?.let { MessageNotifier.cancelThread(context, it, thread.peer) }
+                                vm.setThreadRead(id, thread.peer, read = true)
+                            }
+                        }
+                    } else {
+                        ThreadAction("Mark as unread") {
+                            pendingActions = null
+                            if (id != null) vm.setThreadRead(id, thread.peer, read = false)
+                        }
+                    }
+                    ThreadAction("Delete conversation", color = c.coral) {
+                        pendingActions = null
+                        pendingDelete = thread
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { pendingActions = null }) { Text("Cancel") }
+            },
+        )
     }
 
     pendingDelete?.let { thread ->
@@ -217,6 +268,17 @@ fun MessagesScreen(
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
             },
+        )
+    }
+}
+
+@Composable
+private fun ThreadAction(label: String, color: androidx.compose.ui.graphics.Color? = null, onClick: () -> Unit) {
+    TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            label,
+            color = color ?: IhfThemeAccess.colors.text,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }

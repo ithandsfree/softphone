@@ -36,24 +36,29 @@ object SmsInboxPoller {
                 val api = SoftphoneApi.forAccount(account)
                 val threads = try {
                     api.threads(token, normalizeDidDigits(account.did)).threads
-                } catch (e: ApiException) {
-                    if (e.httpCode == 401) {
-                        // Session expired — skip quietly; UI login paths refresh tokens.
-                        continue
-                    }
-                    emptyList()
+                } catch (_: ApiException) {
+                    // Session expired (401) or the server failed: skip this line and leave its alerts alone. Until
+                    // 0.4.22 a failed check counted as "nothing unread" and cleared the alerts and the app-icon badge
+                    // before the person had read the message.
+                    continue
                 } catch (_: Exception) {
-                    emptyList()
+                    continue // no network or a timeout: same as above
                 }
                 val unread = threads.sumOf { it.unread.coerceAtLeast(0) }
                 total += unread
                 lines += LineInbox(account.id, account.label, threads, unread)
+                MessageNotifier.dismissRead(
+                    context.applicationContext,
+                    account.label,
+                    threads,
+                )
                 if (unread > 0) {
                     MessageNotifier.notifyNewThreads(
                         context = context.applicationContext,
                         lineLabel = account.label,
                         threads = threads,
                         resolveName = { it },
+                        accountId = account.id,
                     )
                 }
             }

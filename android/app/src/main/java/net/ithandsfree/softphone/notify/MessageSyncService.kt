@@ -57,6 +57,11 @@ class MessageSyncService : Service() {
         return START_STICKY
     }
 
+    /** Android 15+: a time-limited service type ran out of time. Stop cleanly; the 15-minute check carries on. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopSelf()
+    }
+
     override fun onDestroy() {
         pollJob?.cancel()
         scope.cancel()
@@ -85,11 +90,17 @@ class MessageSyncService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
+        // Android 15+ caps dataSync at 6 h a day; from Android 14 this message check is a remoteMessaging service
+        // (Android's type for messaging apps, no daily cap). ForegroundStarts falls back to dataSync if refused.
         return ForegroundStarts.promote(
             this,
             SYNC_NOTIF_ID,
             notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            },
         )
     }
 

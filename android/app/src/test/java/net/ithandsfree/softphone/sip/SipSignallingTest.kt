@@ -30,6 +30,26 @@ class SipSignallingTest {
     }
 
     @Test
+    fun tlsCallUriCarriesTheTransportPjsipChecks() {
+        assertEquals(
+            "sip:1002@pbx.example.com;transport=tls",
+            sipCallUri("1002", "pbx.example.com", SipSignalling.TLS),
+        )
+        assertEquals(
+            "sip:16475550100@pbx.example.com;transport=tls",
+            sipCallUri("16475550100", "pbx.example.com", SipSignalling.TLS),
+        )
+    }
+
+    @Test
+    fun tcpCallUriStaysUnmarked() {
+        assertEquals(
+            "sip:1002@pbx.example.com",
+            sipCallUri("1002", "pbx.example.com", SipSignalling.TCP),
+        )
+    }
+
+    @Test
     fun pemBundleWrapsEachCertificate() {
         val pem = pemEncodeCertificates(listOf(byteArrayOf(1, 2, 3), byteArrayOf()))
         assertTrue(pem.startsWith("-----BEGIN CERTIFICATE-----\n"))

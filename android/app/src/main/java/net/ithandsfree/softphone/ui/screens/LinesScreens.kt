@@ -195,7 +195,7 @@ private fun LineCard(
             if (active) Text("Default", style = type.label, color = slot)
             else TextButton(onClick = onActivate) { Text("Make default", color = c.gold) }
         }
-        NumberText("DID ${formatDidForDisplay(line.did.ifBlank { "—" })}", color = c.muted, modifier = Modifier.padding(top = 8.dp))
+        NumberText(if (line.voiceOnly) "No texting number" else "DID ${formatDidForDisplay(line.did.ifBlank { "—" })}", color = c.muted, modifier = Modifier.padding(top = 8.dp))
         Text("Ext ${line.ext.ifBlank { "—" }}", style = type.caption, color = c.caption)
         Spacer(Modifier.height(12.dp))
         PresenceSegment(
@@ -320,6 +320,9 @@ fun LineDetailScreen(
         mutableStateOf(account?.sipExtension.orEmpty())
     }
     var sipSecretDraft by remember(accountId) { mutableStateOf("") }
+    var nameDraft by remember(accountId, account?.label, account?.customLabel) {
+        mutableStateOf(if (account?.customLabel == true) account.label else "")
+    }
     val fieldColors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
         focusedBorderColor = c.gold,
         unfocusedBorderColor = c.hairline,
@@ -365,6 +368,55 @@ fun LineDetailScreen(
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
+            // Voice status, as on the desktop: registered or not, the SIP server and the transport (TLS / TCP).
+            val voice = remember(state.sipSummary, accountId) { vm.voiceStatus(accountId) }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .background(c.surface)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(10.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(if (voice.registered) c.emerald else c.caption),
+                )
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(if (voice.registered) "Voice registered" else "Voice not registered", style = type.label, color = c.text)
+                    val where = listOfNotNull(voice.host.ifBlank { null }, voice.transport).joinToString(" · ")
+                    if (where.isNotBlank()) {
+                        Text(where, style = type.caption.copy(fontFamily = net.ithandsfree.softphone.ui.theme.IbmPlexMonoFamily), color = c.muted)
+                    }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            // Lines show their extension unless the owner names them (same rule as the desktop).
+            Text("LINE NAME", style = type.overline, color = c.caption)
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = nameDraft,
+                    onValueChange = { nameDraft = it.take(24) },
+                    singleLine = true,
+                    placeholder = { Text(account?.sipExtension.orEmpty(), color = c.caption) },
+                    colors = fieldColors,
+                    modifier = Modifier.weight(1f),
+                )
+                androidx.compose.material3.TextButton(
+                    onClick = { vm.renameLine(accountId, nameDraft) },
+                    enabled = nameDraft.trim() != (if (account?.customLabel == true) account.label else ""),
+                ) { Text("Save", color = c.gold) }
+            }
+            Text(
+                "Leave blank to show the extension.",
+                style = type.caption,
+                color = c.caption,
+                modifier = Modifier.padding(top = 6.dp, bottom = 20.dp),
+            )
             Text("PRESENCE", style = type.overline, color = c.caption)
             Spacer(Modifier.height(8.dp))
             PresenceSegment(

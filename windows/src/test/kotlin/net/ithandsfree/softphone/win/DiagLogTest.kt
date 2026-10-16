@@ -7,7 +7,7 @@ import kotlin.test.assertNull
 class DiagLogTest {
     @Test
     fun credentialsNeverReachTheLog() {
-        assertEquals("Authorization: [removed]", DiagLog.redact("Authorization: Digest username=\"9333\", response=\"abc\""))
+        assertEquals("Authorization: [removed]", DiagLog.redact("Authorization: Digest username=\"1001\", response=\"abc\""))
         assertEquals("Proxy-Authorization: [removed]", DiagLog.redact("  Proxy-Authorization: Digest nonce=\"x\""))
         assertNull(DiagLog.redact("sip password=hunter2"))
         assertNull(DiagLog.redact("X-IHF-Token: abc"))

@@ -195,7 +195,7 @@ class PhoneRulesTest {
         assertFalse(recentCanCall("anonymous"))
         assertFalse(recentCanCall("Unknown"))
         assertEquals("Caller ID withheld", recentTextBlock("withheld"))
-        assertEquals("Extensions can't receive texts", recentTextBlock("903"))
+        assertEquals("Extensions can't receive texts", recentTextBlock("1002"))
         assertEquals("Extensions can't receive texts", recentTextBlock("*43"))
         assertNull(recentTextBlock("4165550100"))
         assertTrue(recentCanCall("4165550100"))

@@ -1,5 +1,7 @@
 package net.ithandsfree.softphone
 
+import net.ithandsfree.softphone.diag.CrashLog
+import net.ithandsfree.softphone.sip.StubSipEngine
 import android.app.Application
 import android.content.Context
 import android.net.ConnectivityManager
@@ -29,6 +31,8 @@ import net.ithandsfree.softphone.notify.SmsPollWorker
 import net.ithandsfree.softphone.sip.IncomingCallNotifier
 import net.ithandsfree.softphone.sip.PjsipSipEngine
 import net.ithandsfree.softphone.sip.SipEngine
+import net.ithandsfree.softphone.sip.TelecomBridge
+import net.ithandsfree.softphone.sip.CallLogger
 import net.ithandsfree.softphone.sip.SipRegistrationService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -56,6 +60,18 @@ class SoftphoneApp : Application() {
     lateinit var notifyPrefs: NotifyPrefs
         private set
 
+    /** Bluetooth / car / speaker routing and car controls through Android Telecom. */
+    lateinit var telecom: TelecomBridge
+        private set
+
+    /** Writes Recents for every call (incoming, outgoing, missed, call waiting) as it ends. */
+    lateinit var callLogger: CallLogger
+        private set
+
+    /** True when the previous start did not finish: calling is paused for this start (see CrashLog). */
+    var safeMode = false
+        private set
+
     /** Aggregate inbound unread across enrolled SMS lines (poll-driven). */
     private val _inboxUnread = MutableStateFlow(0)
     val inboxUnread: StateFlow<Int> = _inboxUnread.asStateFlow()
@@ -66,6 +82,14 @@ class SoftphoneApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // First, so a crash anywhere in start-up is recorded and can be sent from the next start.
+        CrashLog.install(this)
+        // A start that never finished (even a native crash) puts this start in safe mode: calling paused, so the
+        // screen opens and offers the report naming the step that failed.
+        safeMode = CrashLog.beginStartup(this) != null
+        // The report also goes in a notification: it can be sent even if the app closes again before its prompt.
+        runCatching { net.ithandsfree.softphone.diag.CrashReportNotifier.postIfReport(this) }
+        CrashLog.step(this, "stores")
         accountStore = AccountStore(this)
         linePrefs = LinePrefs(this)
         hiddenInbox = HiddenInboxStore(this)
@@ -74,12 +98,26 @@ class SoftphoneApp : Application() {
         notifyPrefs = NotifyPrefs(this)
         contactsRepo = DeviceContactsRepository(this)
         callHistory = CallHistoryStore(this)
-        sipEngine = PjsipSipEngine.create(this).also { engine ->
-            runCatching {
-                engine.configureAccounts(accountStore.list())
-                val active = linePrefs.activeLineId()
-                if (active != null) engine.setActiveAccount(active)
-            }.onFailure { Log.w(TAG, "initial SIP configure failed: ${it.message}") }
+        CrashLog.step(this, "sip engine (PJSIP native library)")
+        sipEngine = if (safeMode) {
+            StubSipEngine().also { it.start() }
+        } else {
+            PjsipSipEngine.create(this).also { engine ->
+                CrashLog.step(this, "sip accounts")
+                runCatching {
+                    engine.configureAccounts(accountStore.list())
+                    val active = linePrefs.activeLineId()
+                    if (active != null) engine.setActiveAccount(active)
+                }.onFailure { Log.w(TAG, "initial SIP configure failed: ${it.message}") }
+            }
+        }
+        CrashLog.step(this, "telecom")
+        telecom = TelecomBridge(this, sipEngine).also { bridge ->
+            if (!safeMode) runCatching { bridge.start() }.onFailure { CrashLog.recordNonFatal(this, "telecom start", it) }
+        }
+        CrashLog.step(this, "call log")
+        callLogger = CallLogger(sipEngine, callHistory).also { logger ->
+            runCatching { logger.start() }.onFailure { CrashLog.recordNonFatal(this, "call log start", it) }
         }
         val accounts = runCatching { accountStore.list() }.getOrDefault(emptyList())
         val active = linePrefs.activeLineId()
@@ -87,18 +125,23 @@ class SoftphoneApp : Application() {
             linePrefs.setActiveLineId(accounts.first().id)
             runCatching { sipEngine.setActiveAccount(accounts.first().id) }
         }
+        CrashLog.step(this, "notification channels")
         MessageNotifier.ensureChannel(this)
         MessageSyncService.ensureSyncChannel(this)
         IncomingCallNotifier.ensureChannel(this)
         SipRegistrationService.ensureChannel(this)
         SmsPollWorker.schedule(this)
         SmsPollWorker.kick(this)
+        CrashLog.step(this, "background services")
         // FGS start must never abort Application.onCreate (v0.3.5 phoneCall crash).
-        runCatching { MessageSyncService.reconcile(this) }
+        if (!safeMode) runCatching { MessageSyncService.reconcile(this) }
             .onFailure { Log.e(TAG, "MessageSync reconcile failed: ${it.message}") }
-        runCatching { SipRegistrationService.reconcile(this) }
+        if (!safeMode) runCatching { SipRegistrationService.reconcile(this) }
             .onFailure { Log.e(TAG, "SipRegistration reconcile failed: ${it.message}") }
+        CrashLog.step(this, "network callback")
         registerNetworkCallback()
+        // Background starts (boot, message checks) end here with no screen: "app ready" counts as a finished start.
+        CrashLog.step(this, CrashLog.APP_READY)
         // Tenant skin from BFF health (skipped once the user picks a skin in Settings).
         appScope.launch {
             runCatching {

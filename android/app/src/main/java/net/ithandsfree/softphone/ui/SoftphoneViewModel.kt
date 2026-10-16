@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.ithandsfree.softphone.BuildConfig
+import net.ithandsfree.softphone.data.MmsAttachment
 import net.ithandsfree.softphone.data.AccountStore
 import net.ithandsfree.softphone.data.ApiException
 import net.ithandsfree.softphone.data.CallDirection
@@ -35,6 +36,7 @@ import net.ithandsfree.softphone.data.normalizeEnrolToken
 import net.ithandsfree.softphone.sip.SipCallSnapshot
 import net.ithandsfree.softphone.sip.SipEngine
 import net.ithandsfree.softphone.sip.outboundDialDigits
+import net.ithandsfree.softphone.ui.theme.isVoiceOnly
 import net.ithandsfree.softphone.ui.theme.LineUi
 import net.ithandsfree.softphone.ui.theme.toLineUi
 import java.io.File
@@ -85,6 +87,8 @@ data class UiState(
     val inboxUnreadTotal: Int = 0,
     val contacts: List<DeviceContact> = emptyList(),
     val contactsPermissionDenied: Boolean = false,
+    /** A call could not open the microphone; the screen asks for the Microphone permission again. */
+    val micPermissionNeeded: Boolean = false,
     val pendingEnrolToken: String? = null,
     /** After UM login, when the user owns multiple DIDs and must pick one. */
     val pendingEnrol: PendingEnrol? = null,
@@ -94,6 +98,17 @@ data class UiState(
     val recentsFilter: RecentsFilter = RecentsFilter.All,
     val sipSummary: String = "",
     val call: SipCallSnapshot = SipCallSnapshot(),
+    /** Audio routes for the call (Bluetooth, car, speaker, earpiece). Empty when Telecom is not in use. */
+    val audio: net.ithandsfree.softphone.sip.TelecomBridge.Audio = net.ithandsfree.softphone.sip.TelecomBridge.Audio(),
+    /** A number to put in the keypad (pasted, or from a tel: link). The keypad takes it and clears it. */
+    val dialPrefill: String? = null,
+    /** Voicemail per line id (PBX mailbox through the BFF). */
+    val voicemail: Map<String, net.ithandsfree.softphone.data.VoicemailResponse> = emptyMap(),
+    /** Why a line has no voicemail list (permission off, PBX without the route). */
+    val voicemailNotice: Map<String, String> = emptyMap(),
+    val voicemailLoading: Boolean = false,
+    /** PBX call history per line id (recordings in call details). */
+    val pbxCalls: Map<String, net.ithandsfree.softphone.data.PbxCallsResponse> = emptyMap(),
     val splashDone: Boolean = false,
     /**
      * After enrol / dial, when the line still has no SIP secret — show a clear
@@ -131,19 +146,36 @@ class SoftphoneViewModel(
     private val callHistoryStore: CallHistoryStore,
     private val sipEngine: SipEngine,
     private val cacheDir: File,
+    /** Android Telecom: Bluetooth / car / speaker routing. Null in tests or when Telecom is unavailable. */
+    private val telecom: net.ithandsfree.softphone.sip.TelecomBridge? = null,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    /** Calls up at the last engine change; Recents reloads when one ends (CallLogger wrote it). */
+    private var liveCallKeys = emptySet<Int>()
+
+    /** Blind transfer in progress: what the person asked for; the PBX's answer becomes a status line. */
+    private var transferWatch: String? = null
+
     init {
+        upgradeDeviceTokens()
         sipEngine.setListener {
+            val snap = sipEngine.callSnapshot()
             _state.update {
                 it.copy(
                     sipSummary = sipEngine.registrationSummary(),
-                    call = sipEngine.callSnapshot(),
+                    call = snap,
                 )
             }
+            val keys = listOfNotNull(snap.key.takeIf { snap.active }, snap.waiting?.key).toSet()
+            if ((liveCallKeys - keys).isNotEmpty()) refreshCallHistory()
+            liveCallKeys = keys
+            watchTransfer(snap)
+        }
+        telecom?.let { bridge ->
+            viewModelScope.launch { bridge.audio.collect { a -> _state.update { it.copy(audio = a) } } }
         }
         refreshAccounts()
         refreshCallHistory()
@@ -162,6 +194,10 @@ class SoftphoneViewModel(
     }
 
     fun markSplashDone() = _state.update { it.copy(splashDone = true) }
+
+    fun prefillDial(number: String) = _state.update { it.copy(dialPrefill = number) }
+
+    fun consumeDialPrefill() = _state.update { it.copy(dialPrefill = null) }
 
     fun clearEnrolRequestResult() = _state.update { it.copy(enrolRequestDoneFor = null) }
 
@@ -281,8 +317,21 @@ class SoftphoneViewModel(
             sipEngine.answer()
             refreshSip()
         } catch (e: Exception) {
-            _state.update { it.copy(error = e.message ?: "Answer failed") }
+            if (isMicFailure(e)) {
+                _state.update { it.copy(error = MIC_FAILURE_NOTE, micPermissionNeeded = true) }
+            } else {
+                _state.update { it.copy(error = e.message ?: "Answer failed") }
+            }
         }
+    }
+
+    /**
+     * PJSIP's "Audio subsystem not initialized" (PJMEDIA_EAUD_INIT, 420003): Android would not open the microphone,
+     * almost always because IHF Phone has no Microphone permission (denied, or "Only this time" expired).
+     */
+    private fun isMicFailure(e: Exception): Boolean {
+        val m = e.message.orEmpty()
+        return "PJMEDIA_EAUD" in m || "420003" in m || "Audio subsystem not initialized" in m
     }
 
     fun declineCall() {
@@ -290,10 +339,95 @@ class SoftphoneViewModel(
         refreshSip()
     }
 
+    /** Speaker on or off. Through Telecom it returns to Bluetooth / the car when that is connected. */
     fun toggleSpeakerphone() {
+        if (telecom?.toggleSpeaker() == true) return
         val next = !_state.value.call.speakerOn
         sipEngine.setSpeakerphone(next)
         refreshSip()
+    }
+
+    /** Sends call audio to a route Android offers (Bluetooth, car, speaker, earpiece, wired headset). */
+    fun routeAudio(endpoint: androidx.core.telecom.CallEndpointCompat) {
+        telecom?.route(endpoint)
+    }
+
+    private fun inCall(action: String, block: () -> Unit) {
+        try {
+            block()
+            refreshSip()
+        } catch (e: Exception) {
+            _state.update { it.copy(error = "$action failed: ${e.message ?: e.javaClass.simpleName}") }
+        }
+    }
+
+    /** Mutes the microphone only; the caller is still heard. */
+    fun toggleMute() = inCall("Mute") { sipEngine.setMuted(!_state.value.call.muted) }
+
+    fun toggleHold() = inCall("Hold") { sipEngine.setHold(!_state.value.call.held) }
+
+    fun sendDtmf(digits: String) = inCall("Keypad") { sipEngine.dtmf(digits) }
+
+    /** Blind transfer to [destination]; the result shows when the PBX reports it. */
+    fun transferCall(destination: String, shown: String = destination) = inCall("Transfer") {
+        transferWatch = shown
+        sipEngine.transfer(destination)
+        _state.update { it.copy(status = "Sending the call to $shown…") }
+    }
+
+    /** Attended transfer, step 1 ("Talk first"): the caller waits on hold while you call [destination]. */
+    fun consultTransfer(destination: String) = inCall("Transfer") {
+        sipEngine.consult(destination)
+        _state.update { it.copy(status = "Calling $destination. The caller is on hold.") }
+    }
+
+    /** Attended transfer, step 2: connect the caller to the person you are talking to. */
+    fun completeTransfer() = inCall("Transfer") {
+        transferWatch = "the person you called"
+        sipEngine.completeConsult()
+        _state.update { it.copy(status = "Connecting the caller…") }
+    }
+
+    /** Attended transfer abandoned: back to the caller. */
+    fun cancelTransfer() = inCall("Transfer") {
+        sipEngine.cancelConsult()
+        _state.update { it.copy(status = "Back with the caller") }
+    }
+
+    /** The extension the current call is on (the line it rang on or was placed from). */
+    fun callExtension(): String? {
+        val lineId = _state.value.call.lineId ?: _state.value.activeLineId
+        return store.list().firstOrNull { it.id == lineId }?.sipExtension?.ifBlank { null }
+    }
+
+    /**
+     * "Send to my other devices": a blind transfer to the call's own extension, so the desk phone, the desktop app
+     * and any other device on that extension ring, and whichever is picked up takes the call.
+     */
+    fun sendToOtherDevices() {
+        val ext = callExtension() ?: return
+        transferCall(ext, "your other devices on $ext")
+    }
+
+    /** Call waiting: hold the current call and answer the one ringing beside it. */
+    fun answerWaiting() = inCall("Answer") { sipEngine.waitingAnswer() }
+
+    /** Declines the ringing second call (busy: the PBX tries other devices, then voicemail) or ends the call on hold. */
+    fun endWaiting() = inCall("Second call") { sipEngine.waitingEnd() }
+
+    fun swapCalls() = inCall("Swap") { sipEngine.swap() }
+
+    private fun watchTransfer(snap: SipCallSnapshot) {
+        val shown = transferWatch ?: return
+        val code = snap.transferCode
+        val message = when {
+            code in 200..299 -> "Call sent to $shown"
+            code >= 300 && snap.transferFinal -> "Transfer to $shown failed: $code ${snap.transferText}".trim()
+            !snap.active -> "Call sent to $shown"
+            else -> return
+        }
+        transferWatch = null
+        _state.update { it.copy(status = message) }
     }
 
     fun refreshCallHistory() {
@@ -310,6 +444,156 @@ class SoftphoneViewModel(
     }
 
     fun callRecord(id: String): CallRecord? = callHistoryStore.get(id)
+
+    // ---- PBX: voicemail and call history (same BFF routes as the desktop app) ------------------------------------
+
+    /** Runs [block] with the line's API and token, signing in again once on a 401. */
+    private suspend fun <T> withLine(account: SoftphoneAccount, block: suspend (SoftphoneApi, String) -> T): T {
+        val api = SoftphoneApi.forAccount(account)
+        return try {
+            block(api, tokenFor(account))
+        } catch (e: ApiException) {
+            if (e.httpCode != 401) throw e
+            store.clearToken(account.id)
+            block(api, tokenFor(account))
+        }
+    }
+
+    /** Reloads every line's mailbox. A new message since the last load gives a status line. */
+    fun loadVoicemail() {
+        viewModelScope.launch {
+            val accounts = store.list().filter { it.did.isNotBlank() }
+            if (accounts.isEmpty()) return@launch
+            _state.update { it.copy(voicemailLoading = it.voicemail.isEmpty()) }
+            val before = _state.value.voicemail
+            val got = mutableMapOf<String, net.ithandsfree.softphone.data.VoicemailResponse>()
+            val notices = mutableMapOf<String, String>()
+            accounts.forEach { acc ->
+                try {
+                    got[acc.id] = withLine(acc) { api, token -> api.voicemail(token, acc.did) }
+                } catch (e: ApiException) {
+                    notices[acc.id] = when {
+                        e.error == "voicemail_disabled" ->
+                            "Voicemail for ${acc.displayName} is not turned on for your user (UCP > Voicemail). Ask your administrator."
+                        e.httpCode == 404 -> "This PBX does not offer the voicemail list yet. You can still dial your mailbox."
+                        else -> "Could not load voicemail for ${acc.displayName}."
+                    }
+                } catch (e: Exception) {
+                    notices[acc.id] = "Could not load voicemail for ${acc.displayName}."
+                }
+            }
+            val fresh = got.entries.firstOrNull { (id, r) ->
+                val old = before[id] ?: return@firstOrNull false
+                r.messages.count { it.new } > old.messages.count { it.new }
+            }
+            _state.update {
+                it.copy(
+                    voicemail = got,
+                    voicemailNotice = notices,
+                    voicemailLoading = false,
+                    status = fresh?.let { (id, _) ->
+                        "New voicemail on ${accounts.firstOrNull { a -> a.id == id }?.displayName ?: "a line"}"
+                    } ?: it.status,
+                )
+            }
+        }
+    }
+
+    /** New voicemails across lines, for the Voicemail tab badge. */
+    fun newVoicemailCount(): Int = _state.value.voicemail.values.sumOf { r -> r.messages.count { it.new } }
+
+    /** The PBX's "My Voicemail" code for a line (*97 when the BFF has not said). */
+    fun voicemailDialCode(lineId: String?): String =
+        _state.value.voicemail[lineId]?.dial?.ifBlank { null }
+            ?: _state.value.voicemail.values.firstOrNull { it.dial.isNotBlank() }?.dial
+            ?: "*97"
+
+    suspend fun voicemailAudio(lineId: String, id: String, download: Boolean = false): ByteArray {
+        val acc = store.list().firstOrNull { it.id == lineId } ?: error("Line not found")
+        return withLine(acc) { api, token -> api.voicemailAudio(token, acc.did, id, download) }
+    }
+
+    /** Playing a new message moves it to Old on the PBX (heard), as in UCP. */
+    fun markVoicemailHeard(lineId: String, id: String) {
+        viewModelScope.launch {
+            val acc = store.list().firstOrNull { it.id == lineId } ?: return@launch
+            runCatching { withLine(acc) { api, token -> api.voicemailHeard(token, acc.did, id) } }
+            _state.update { s ->
+                val r = s.voicemail[lineId] ?: return@update s
+                s.copy(
+                    voicemail = s.voicemail + (
+                        lineId to r.copy(messages = r.messages.map { if (it.id == id) it.copy(new = false, folder = "Old") else it })
+                        ),
+                )
+            }
+        }
+    }
+
+    private val voicemailDeleting = mutableSetOf<String>()
+
+    /** Deletes a voicemail on the PBX. One request per message, even on a quick second press. */
+    fun deleteVoicemail(lineId: String, id: String) {
+        if (!voicemailDeleting.add("$lineId/$id")) return
+        viewModelScope.launch {
+            try {
+                val acc = store.list().firstOrNull { it.id == lineId } ?: return@launch
+                withLine(acc) { api, token -> api.deleteVoicemail(token, acc.did, id) }
+                _state.update { s ->
+                    val r = s.voicemail[lineId] ?: return@update s
+                    s.copy(
+                        voicemail = s.voicemail + (lineId to r.copy(messages = r.messages.filter { it.id != id })),
+                        status = "Voicemail deleted",
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "Delete voicemail failed: ${e.message}") }
+            } finally {
+                voicemailDeleting.remove("$lineId/$id")
+            }
+        }
+    }
+
+    /** PBX call history for a line (recordings in call details). Cached until [force]. */
+    fun loadPbxCalls(lineId: String, force: Boolean = false) {
+        if (!force && _state.value.pbxCalls.containsKey(lineId)) return
+        viewModelScope.launch {
+            val acc = store.list().firstOrNull { it.id == lineId } ?: return@launch
+            val r = runCatching { withLine(acc) { api, token -> api.pbxCalls(token, acc.did) } }.getOrNull() ?: return@launch
+            _state.update { it.copy(pbxCalls = it.pbxCalls + (lineId to r)) }
+        }
+    }
+
+    suspend fun recordingAudio(lineId: String, callId: String, download: Boolean = false): ByteArray {
+        val acc = store.list().firstOrNull { it.id == lineId } ?: error("Line not found")
+        return withLine(acc) { api, token -> api.recording(token, acc.did, callId, download) }
+    }
+
+    /** Dials the line's own mailbox (greetings, mailbox menu). */
+    fun callVoicemail(lineId: String?) {
+        val id = lineId ?: _state.value.outboundLineId ?: _state.value.activeLineId ?: return
+        placeCall(id, voicemailDialCode(id), "Voicemail")
+    }
+
+    /** Owner-chosen line name; blank (or the extension itself) goes back to showing the extension. */
+    /** Voice status for a line's detail card: registered or not, the SIP server, and TLS / TCP (desktop parity). */
+    data class VoiceStatus(val registered: Boolean, val host: String, val transport: String?)
+
+    fun voiceStatus(lineId: String): VoiceStatus {
+        val acc = store.list().firstOrNull { it.id == lineId }
+        return VoiceStatus(
+            registered = runCatching { sipEngine.isLineRegistered(lineId) }.getOrDefault(false),
+            host = acc?.sipDomain.orEmpty(),
+            transport = runCatching { sipEngine.signallingLabel() }.getOrNull(),
+        )
+    }
+
+    fun renameLine(lineId: String, name: String) {
+        val acc = store.list().firstOrNull { it.id == lineId } ?: return
+        val trimmed = name.trim().take(24)
+        val custom = trimmed.isNotBlank() && trimmed != acc.sipExtension
+        store.upsert(acc.copy(label = if (custom) trimmed else acc.label, customLabel = custom))
+        refreshAccounts()
+    }
 
     fun deleteCallRecord(id: String) {
         callHistoryStore.delete(id)
@@ -396,7 +680,12 @@ class SoftphoneViewModel(
             sipEngine.call(digits)
             ok = true
         } catch (e: Exception) {
-            note = e.message ?: "Call failed"
+            note = if (isMicFailure(e)) {
+                _state.update { it.copy(micPermissionNeeded = true) }
+                MIC_FAILURE_NOTE
+            } else {
+                e.message ?: "Call failed"
+            }
         }
         val record = CallRecord(
             lineId = lineId,
@@ -407,8 +696,11 @@ class SoftphoneViewModel(
             answered = false,
             note = if (ok) "" else note.ifBlank { "Call not connected — check SIP registration" },
         )
-        callHistoryStore.append(record)
-        refreshCallHistory()
+        // A placed call is logged by CallLogger when it ends (with its talk time); only failed dials are kept here.
+        if (!ok) {
+            callHistoryStore.append(record)
+            refreshCallHistory()
+        }
         _state.update {
             it.copy(
                 status = if (ok) {
@@ -576,6 +868,9 @@ class SoftphoneViewModel(
     }
 
     fun clearError() = _state.update { it.copy(error = null) }
+
+    /** A short status line (snackbar). */
+    fun showStatus(message: String) = _state.update { it.copy(status = message) }
     fun clearStatus() = _state.update { it.copy(status = null) }
 
     fun setPendingEnrolToken(token: String?) {
@@ -619,9 +914,31 @@ class SoftphoneViewModel(
                 val domain = resolveSipDomain(sipDomain)
                 val api = SoftphoneApi(base)
                 val session = api.session(token)
+                // Keep the long-lived device token the server issues for this phone (about 180 days), not the setup
+                // link (3 days): storing the setup token logged lines out of messaging when the link expired.
+                val deviceToken = session.token.ifBlank { token }
                 val allDids = session.lines.map { normalizeDidDigits(it.did) }.filter { it.isNotBlank() }.distinct()
                 if (allDids.isEmpty()) throw ApiException("no_lines", 400)
                 val maxExt = session.entitlements?.maxExtensions ?: 2
+                // A setup link for lines already on this phone signs them in again (new device token) instead of
+                // adding them twice. Only when this user has no other line to add here does setup stop there.
+                val already = store.list().filter { normalizeDidDigits(it.did) in allDids }
+                already.forEach { store.saveToken(it.id, deviceToken) }
+                val canAdd = store.list().size < maxExt &&
+                    allDids.any { d -> store.list().none { normalizeDidDigits(it.did) == d } }
+                val preferredHere = preferDid?.let { p -> already.any { normalizeDidDigits(it.did) == normalizeDidDigits(p) } } == true
+                if (already.isNotEmpty() && (!canAdd || preferredHere)) {
+                    refreshAccounts()
+                    _state.update {
+                        it.copy(
+                            busy = false,
+                            error = null,
+                            status = "Signed in again: " + already.joinToString { a -> a.displayName.ifBlank { a.label } },
+                            splashDone = true,
+                        )
+                    }
+                    return@launch
+                }
                 if (store.list().size >= maxExt) {
                     throw ApiException("max_extensions_reached ($maxExt)", 403)
                 }
@@ -645,7 +962,7 @@ class SoftphoneViewModel(
                         sipPassword = sipPassword,
                         apiBase = base,
                         sipDomain = domain,
-                        token = token,
+                        token = deviceToken,
                         did = preferred,
                         lineCountHint = allDids.size,
                         lineInfos = infos,
@@ -659,7 +976,7 @@ class SoftphoneViewModel(
                         sipPassword = sipPassword,
                         apiBase = base,
                         sipDomain = domain,
-                        token = token,
+                        token = deviceToken,
                         did = unused.first(),
                         lineCountHint = allDids.size,
                         lineInfos = infos,
@@ -679,7 +996,7 @@ class SoftphoneViewModel(
                                     sipPassword = sipPassword,
                                     apiBase = base,
                                     sipDomain = domain,
-                                    token = token,
+                                    token = deviceToken,
                                     dids = choices,
                                     lineInfos = infos,
                                     maxExtensions = maxExt,
@@ -695,7 +1012,7 @@ class SoftphoneViewModel(
                         sipPassword = sipPassword,
                         apiBase = base,
                         sipDomain = domain,
-                        token = token,
+                        token = deviceToken,
                         did = unused.firstOrNull() ?: allDids.first(),
                         lineCountHint = allDids.size,
                         lineInfos = infos,
@@ -1140,12 +1457,16 @@ class SoftphoneViewModel(
 
     private fun applyCapabilities(accountId: String, lines: List<LineInfo>) {
         val acc = store.list().firstOrNull { it.id == accountId } ?: return
+        // Match by number; else by extension, which covers a voice-only line (listed under its extension) that has
+        // since been given a texting number, or a number that was removed again. The line then follows the change.
         val info = lines.firstOrNull { normalizeDidDigits(it.did) == normalizeDidDigits(acc.did) }
+            ?: lines.firstOrNull { acc.sipExtension.isNotBlank() && it.extension == acc.sipExtension }
             ?: return
         val caps = info.capabilities ?: LineCapabilities()
         val ext = info.extension?.takeIf { it.isNotBlank() }
         store.upsert(
             acc.copy(
+                did = normalizeDidDigits(info.did).ifBlank { acc.did },
                 capVoice = caps.voice,
                 capSms = caps.sms,
                 capMms = caps.mms,
@@ -1171,11 +1492,26 @@ class SoftphoneViewModel(
         _state.update { it.copy(status = "Ringtone · ${optionId ?: "default"}") }
     }
 
+    /**
+     * Lines set up by app versions before 0.4.5 kept the 3-day setup-link token instead of the device token. While
+     * that token is still valid, /v1/session swaps it for a device token (about 180 days); a device token comes back
+     * unchanged. Same as the Windows app's upgradeTokens().
+     */
+    private fun upgradeDeviceTokens() {
+        viewModelScope.launch(Dispatchers.IO) {
+            store.list().forEach { acc ->
+                val current = store.token(acc.id) ?: return@forEach
+                val fresh = runCatching { SoftphoneApi.forAccount(acc).session(current).token }.getOrNull()
+                if (!fresh.isNullOrBlank() && fresh != current) store.saveToken(acc.id, fresh)
+            }
+        }
+    }
+
     suspend fun tokenFor(account: SoftphoneAccount): String {
         store.token(account.id)?.let { return it }
         if (account.umPassword.isBlank()) {
             throw ApiException(
-                "session_expired — re-open your HTTPS enrol link or sign in with User Manager",
+                "This line is signed out. Open Lines, choose the line, then Set up this line again (or open a new setup email).",
                 401,
             )
         }
@@ -1196,8 +1532,13 @@ class SoftphoneViewModel(
     fun loadThreads(accountId: String = _state.value.messagesLineId.orEmpty()) {
         if (accountId.isBlank()) return
         viewModelScope.launch {
-            val account = store.list().firstOrNull { it.id == accountId } ?: return@launch
             refreshCapabilitiesSuspend(accountId)
+            // Re-read after the refresh: a voice-only line may just have been given a texting number.
+            val account = store.list().firstOrNull { it.id == accountId } ?: return@launch
+            if (account.isVoiceOnly()) {
+                _state.update { it.copy(threads = emptyList(), busy = false, error = null) }
+                return@launch
+            }
             _state.update { it.copy(busy = true, error = null, offline = false) }
             try {
                 val api = SoftphoneApi.forAccount(account)
@@ -1262,9 +1603,10 @@ class SoftphoneViewModel(
                 _state.update {
                     it.copy(
                         busy = false,
-                        messages = msgs,
+                        // Oldest first by message time (then id), whatever order the server sends.
+                        messages = msgs.sortedWith(compareBy({ it.datetime.orEmpty() }, { it.id ?: 0 })),
                         threads = updatedThreads,
-                        status = "${msgs.size} messages",
+                        // No "N messages" notice: it covered the reply box while typing.
                     )
                 }
             } catch (e: Exception) {
@@ -1323,6 +1665,47 @@ class SoftphoneViewModel(
                 _state.update {
                     it.copy(busy = false, error = e.message ?: "mark_read_failed")
                 }
+            }
+        }
+    }
+
+    /** Mark one conversation read or unread on the PBX (shared with UCP and the desktop app). */
+    fun setThreadRead(accountId: String, peer: String, read: Boolean, onDone: (() -> Unit)? = null) {
+        viewModelScope.launch {
+            val account = store.list().firstOrNull { it.id == accountId } ?: return@launch
+            val peerNorm = normalizeDidDigits(peer)
+            try {
+                val api = SoftphoneApi.forAccount(account)
+                val token = tokenFor(account)
+                val marked = if (read) {
+                    api.markThreadRead(token, account.did, peerNorm).marked
+                } else {
+                    api.markThreadUnread(token, account.did, peerNorm).marked
+                }
+                _state.update { s ->
+                    s.copy(
+                        threads = s.threads.map { t ->
+                            if (normalizeDidDigits(t.peer) != peerNorm) {
+                                t
+                            } else if (read) {
+                                t.copy(unread = 0)
+                            } else if (marked > 0) {
+                                t.copy(unread = maxOf(t.unread, 1))
+                            } else {
+                                t
+                            }
+                        },
+                        status = when {
+                            read -> "Marked as read"
+                            marked > 0 -> "Marked as unread"
+                            else -> "Nothing to mark unread (no message received in this conversation)"
+                        },
+                    )
+                }
+                onDone?.invoke()
+            } catch (e: Exception) {
+                // A status line, not `error`: the chat screen shows `error` as "Couldn't send".
+                _state.update { it.copy(status = "Couldn't change read status (${e.message ?: "network"})") }
             }
         }
     }
@@ -1446,27 +1829,19 @@ class SoftphoneViewModel(
             }
             _state.update { it.copy(busy = true, error = null) }
             try {
-                val tmp = withContext(Dispatchers.IO) {
-                    val name = "mms_${System.currentTimeMillis()}.bin"
-                    val file = File(cacheDir, name)
-                    contentResolver.openInputStream(contentUri)?.use { input ->
-                        FileOutputStream(file).use { output -> input.copyTo(output) }
-                    } ?: throw ApiException("cannot_read_attachment", 400)
-                    file
-                }
-                val maxBytes = 1_000_000L
-                if (tmp.length() > maxBytes) {
-                    tmp.delete()
-                    _state.update {
-                        it.copy(busy = false, error = "Attachment too large (max ~1 MB). Resize and try again.")
-                    }
-                    return@launch
-                }
+                val prepared = withContext(Dispatchers.IO) { MmsAttachment.prepare(cacheDir, contentResolver, contentUri) }
                 val api = SoftphoneApi.forAccount(account)
                 val token = tokenFor(account)
-                api.sendMms(token, account.did, peer, tmp)
-                tmp.delete()
+                try {
+                    api.sendMms(token, account.did, peer, prepared.file, prepared.mimeType)
+                } finally {
+                    prepared.file.delete()
+                }
                 loadMessages(accountId, peer)
+            } catch (e: MmsAttachment.Problem) {
+                _state.update { it.copy(busy = false, error = e.message) }
+            } catch (e: ApiException) {
+                _state.update { it.copy(busy = false, error = MmsAttachment.explain(e.error)) }
             } catch (e: Exception) {
                 _state.update { it.copy(busy = false, error = e.message ?: "send_media_failed") }
             }
@@ -1486,6 +1861,10 @@ class SoftphoneViewModel(
         }
     }
 
+    fun micPermissionAsked() {
+        _state.update { it.copy(micPermissionNeeded = false) }
+    }
+
     fun markContactsPermissionDenied() {
         _state.update { it.copy(contactsPermissionDenied = true, contacts = emptyList()) }
     }
@@ -1499,6 +1878,9 @@ class SoftphoneViewModel(
     }
 
     companion object {
+        const val MIC_FAILURE_NOTE =
+            "IHF Phone couldn't use the microphone. Allow it: Settings > Apps > IHF Phone > Permissions > Microphone > Allow."
+
         fun factory(
             store: AccountStore,
             linePrefs: LinePrefs,
@@ -1507,6 +1889,7 @@ class SoftphoneViewModel(
             callHistory: CallHistoryStore,
             sip: SipEngine,
             cacheDir: File,
+            telecom: net.ithandsfree.softphone.sip.TelecomBridge? = null,
         ) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1518,6 +1901,7 @@ class SoftphoneViewModel(
                     callHistory,
                     sip,
                     cacheDir,
+                    telecom,
                 ) as T
             }
         }

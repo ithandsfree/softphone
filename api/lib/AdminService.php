@@ -79,16 +79,25 @@ class AdminService {
 
 		$resolved = $this->resolveUser($ext, isset($in['username']) ? (string)$in['username'] : null);
 		if ($resolved === null) {
-			return ['ok' => false, 'error' => 'user_not_found', 'detail' => "No Userman user for extension $ext"];
+			return ['ok' => false, 'error' => 'user_not_found', 'detail' => "No User Management user owns extension $ext"];
 		}
 		$uid = (int)$resolved['uid'];
 		$username = (string)$resolved['username'];
-		$email = trim((string)($in['email'] ?? $resolved['email'] ?? ''));
+		// The setup link signs in as this User Management user, so it only ever goes to that user's own address in
+		// User Management. An address typed in the admin page is ignored (2026-10-11: a stale address sent ext 1002's
+		// link to another user).
+		$email = trim((string)($resolved['email'] ?? ''));
 		$label = trim((string)($in['label'] ?? ("ext $ext")));
 		$sendEmail = !empty($in['send_email']);
 
 		$did = $this->primaryDidForExt($uid, $ext);
 		$ttl = (int)($this->config['token_ttl_seconds'] ?? 86400);
+		// A new setup link replaces the previous one for this extension. Phones already set up keep working: they
+		// swapped their setup link for a device token at /v1/session.
+		$previous = $this->assignments->get($ext);
+		if (is_array($previous) && !empty($previous['token'])) {
+			$this->revokeSetupLink((string)$previous['token']);
+		}
 		$token = $this->tokens->issue($uid, $username);
 		$exp = time() + $ttl;
 		$expIso = gmdate('c', $exp);
@@ -133,6 +142,8 @@ class AdminService {
 				'enrol_url' => $enrolUrl,
 				'deep_link' => $deep,
 				'install_url' => $installUrl,
+				'install_android' => trim((string)($this->config['install_android_url'] ?? '')),
+				'install_windows' => trim((string)($this->config['install_windows_url'] ?? '')),
 				'expires_iso' => $expIso,
 			]);
 			$row['email_sent_at'] = !empty($mailResult['ok']) ? time() : null;
@@ -212,6 +223,8 @@ class AdminService {
 					'enrol_url' => (string)($primaryResult['assignment']['enrol_url'] ?? ''),
 					'deep_link' => (string)($primaryResult['assignment']['deep_link'] ?? ''),
 					'install_url' => (string)($primaryResult['assignment']['install_url'] ?? ''),
+					'install_android' => trim((string)($this->config['install_android_url'] ?? '')),
+					'install_windows' => trim((string)($this->config['install_windows_url'] ?? '')),
 					'expires_iso' => (string)($primaryResult['assignment']['token_exp_iso'] ?? ''),
 					'extra_lines' => $extraUrls,
 				];
@@ -279,14 +292,62 @@ class AdminService {
 		if ($existing === null) {
 			return ['ok' => false, 'error' => 'assignment_not_found'];
 		}
+		// The address always comes from User Management; $emailOverride is ignored (kept for old admin pages).
 		$result = $this->assign([
 			'extension' => $ext,
 			'username' => $existing['username'] ?? null,
-			'email' => $emailOverride ?: ($existing['email'] ?? ''),
 			'label' => $existing['label'] ?? null,
 			'send_email' => true,
 		]);
+		if (empty($result['ok']) && ($result['error'] ?? '') === 'user_not_found') {
+			// The stored user no longer owns this extension: use whoever owns it in User Management now.
+			$result = $this->assign([
+				'extension' => $ext,
+				'label' => $existing['label'] ?? null,
+				'send_email' => true,
+			]);
+		}
 		return $result;
+	}
+
+	/**
+	 * Takes an extension off the softphone list and cancels its setup link. With $signOutDevices, phones and PCs
+	 * already set up for the owning user are signed out too (their device tokens are revoked); they can be set up
+	 * again from a new link. To lock someone out completely, also change or disable the user in User Management,
+	 * because the softphone can sign in with that login.
+	 *
+	 * @return array{ok:bool,error?:string,removed?:string,devices_signed_out?:int}
+	 */
+	public function removeAssignment(string $ext, bool $signOutDevices = false): array {
+		$ext = AssignmentStore::normExt($ext);
+		$existing = $ext === '' ? null : $this->assignments->get($ext);
+		if ($existing === null) {
+			return ['ok' => false, 'error' => 'assignment_not_found'];
+		}
+		if (!empty($existing['token'])) {
+			$this->revokeSetupLink((string)$existing['token']);
+		}
+		$signedOut = 0;
+		if ($signOutDevices && !empty($existing['uid'])) {
+			$signedOut = $this->tokens->revokeForUser((int)$existing['uid']);
+		}
+		$this->assignments->forget($ext);
+		return ['ok' => true, 'removed' => $ext, 'devices_signed_out' => $signedOut];
+	}
+
+	/** Cancels a setup link: the token stops working and its setup page is deleted. */
+	private function revokeSetupLink(string $token): void {
+		$this->tokens->revoke($token);
+		if (!preg_match('/^[a-f0-9]{16,128}$/', $token)) {
+			return;
+		}
+		foreach (['/var/www/html/ihf-softphone/enrol', dirname(__DIR__) . '/enrol'] as $base) {
+			$dir = $base . '/' . $token;
+			if (is_dir($dir)) {
+				@unlink($dir . '/index.html');
+				@rmdir($dir);
+			}
+		}
 	}
 
 	public function listAssignments(): array {
@@ -326,6 +387,12 @@ class AdminService {
 		if ($username !== null && trim($username) !== '') {
 			$u = $um->getUserByUsername(trim($username));
 			if (!$u) {
+				return null;
+			}
+			// A named user must own the extension (device or default extension) in User Management.
+			$owns = in_array($ext, $this->devicesForUser($um, (int)$u['id']), true)
+				|| (string)($u['default_extension'] ?? '') === $ext;
+			if (!$owns) {
 				return null;
 			}
 			$email = (string)($u['email'] ?? '');
@@ -477,13 +544,27 @@ class AdminService {
 			// The page lives at enrol/<token>/index.html, two levels below the BFF directory.
 			$emblemHtml = '<img src="../../' . $h($emblem) . '" width="42" height="36" alt=""/>';
 		}
+		// Install buttons: one per platform when configured, else the single sideload link.
+		$buttons = '';
+		foreach ([
+			['install_android_url', 'Get it for Android'],
+			['install_windows_url', 'Get it for Windows'],
+		] as [$key, $text]) {
+			$url = trim((string)($this->config[$key] ?? ''));
+			if (preg_match('#^https://#i', $url)) {
+				$buttons .= '<a class="btn ghost" href="' . $h($url) . '">' . $h($text) . '</a>';
+			}
+		}
+		if ($buttons === '' && $install !== '') {
+			$buttons = '<a class="btn ghost" href="' . $h($install) . '">Get the app</a>';
+		}
 		$html = str_replace(
 			[
-				'__TOKEN__', '__DEEP_LINK__', '__LABEL__', '__EXPIRES__', '__INSTALL_URL__',
+				'__TOKEN__', '__DEEP_LINK__', '__LABEL__', '__EXPIRES__', '__INSTALL_URL__', '__INSTALL_BUTTONS__',
 				'__PRODUCT__', '__BRAND_LINE__', '__FOOTER_LINE__', '__EMBLEM__',
 			],
 			[
-				$h($token), $h($deep), $h($label), $h($expIso), $h($install),
+				$h($token), $h($deep), $h($label), $h($expIso), $h($install), $buttons,
 				$h($product), $h(strtoupper((string)($this->config['mail_brand_line'] ?? ''))),
 				$h((string)($this->config['mail_footer_line'] ?? '')), $emblemHtml,
 			],

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dialpad
 import androidx.compose.material.icons.filled.ExpandMore
@@ -65,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import net.ithandsfree.softphone.data.CallDirection
 import net.ithandsfree.softphone.data.CallRecord
 import net.ithandsfree.softphone.data.KeypadPrefs
+import net.ithandsfree.softphone.data.numberFromPaste
 import net.ithandsfree.softphone.data.formatDialDigits
 import net.ithandsfree.softphone.data.formatDidForDisplay
 import net.ithandsfree.softphone.data.formatPeerForDisplay
@@ -84,7 +87,7 @@ import net.ithandsfree.softphone.ui.theme.LocalIhfType
 enum class CallsSubTab { Keypad, Recents, Contacts, Voicemail }
 
 /** Icon + short label for each Calls sub-destination. Icons lead so the bar reads the same in any locale. */
-private fun callsNavItems(missedBadge: Boolean) = listOf(
+private fun callsNavItems(missedBadge: Boolean, voicemailBadge: Boolean = false) = listOf(
     IconNavItem(CallsSubTab.Keypad, "Keypad", Icons.Default.Dialpad, "Keypad, dial a number"),
     IconNavItem(
         CallsSubTab.Recents,
@@ -94,7 +97,13 @@ private fun callsNavItems(missedBadge: Boolean) = listOf(
         badge = missedBadge,
     ),
     IconNavItem(CallsSubTab.Contacts, "Contacts", Icons.Default.People, "Contacts, address book"),
-    IconNavItem(CallsSubTab.Voicemail, "Voicemail", Icons.Default.Voicemail, "Voicemail"),
+    IconNavItem(
+        CallsSubTab.Voicemail,
+        "Voicemail",
+        Icons.Default.Voicemail,
+        if (voicemailBadge) "Voicemail, new messages" else "Voicemail",
+        badge = voicemailBadge,
+    ),
 )
 
 @Composable
@@ -105,11 +114,15 @@ fun CallsHubScreen(
     onTabChange: (CallsSubTab) -> Unit,
     onOpenCallDetail: (String) -> Unit,
     onOpenContact: (Long) -> Unit,
+    /** Text a number from a given line (voicemail Text). */
+    onMessage: (lineId: String, number: String) -> Unit = { _, _ -> },
 ) {
     val state by vm.state.collectAsState()
     val c = IhfThemeAccess.colors
     val type = LocalIhfType.current
     val hasMissed = state.callHistory.any { it.direction == CallDirection.Missed }
+    // New-voicemail badge: the mailboxes load once when Calls opens; the Voicemail tab refreshes every minute.
+    LaunchedEffect(Unit) { vm.loadVoicemail() }
 
     Column(
         Modifier
@@ -123,7 +136,7 @@ fun CallsHubScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
         IconNavRow(
-            items = callsNavItems(hasMissed),
+            items = callsNavItems(hasMissed, state.voicemail.values.any { r -> r.messages.any { it.new } }),
             selected = tab,
             onSelect = onTabChange,
             modifier = Modifier
@@ -146,12 +159,7 @@ fun CallsHubScreen(
                 onOpenContact = onOpenContact,
                 showHeader = false,
             )
-            CallsSubTab.Voicemail -> EmptyState(
-                title = "Voicemail",
-                body = "Voicemail listing comes next. Missed calls still appear under Recents.",
-                primaryLabel = "Open Recents",
-                onPrimary = { onTabChange(CallsSubTab.Recents) },
-            )
+            CallsSubTab.Voicemail -> VoicemailPane(vm = vm, onMessage = onMessage)
         }
     }
 }
@@ -173,6 +181,39 @@ private fun KeypadPane(vm: SoftphoneViewModel, keypadPrefs: KeypadPrefs) {
     DisposableEffect(feedback) {
         onDispose { feedback.release() }
     }
+    // A number pasted elsewhere or sent from another app (Google Maps "Call").
+    LaunchedEffect(state.dialPrefill) {
+        state.dialPrefill?.let {
+            digits = it
+            vm.consumeDialPrefill()
+        }
+    }
+    // Paste: the chip shows while the clipboard holds text. Only the description is checked here, so Android's
+    // "pasted from your clipboard" notice appears only when the person actually pastes.
+    val clipboard = remember { context.getSystemService(android.content.ClipboardManager::class.java) }
+    var clipHasText by remember { mutableStateOf(false) }
+    DisposableEffect(clipboard) {
+        fun check() {
+            clipHasText = clipboard?.primaryClipDescription?.let {
+                it.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_PLAIN) ||
+                    it.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_HTML)
+            } == true
+        }
+        check()
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener { check() }
+        clipboard?.addPrimaryClipChangedListener(listener)
+        onDispose { clipboard?.removePrimaryClipChangedListener(listener) }
+    }
+    fun paste() {
+        val text = clipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+        val number = numberFromPaste(text)
+        if (number == null) {
+            vm.showStatus("No phone number on the clipboard")
+        } else {
+            digits = number
+            feedback.onDigit(number.last())
+        }
+    }
 
     Column(
         Modifier
@@ -191,10 +232,25 @@ private fun KeypadPane(vm: SoftphoneViewModel, keypadPrefs: KeypadPrefs) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(64.dp)
+                // Long-press the number to paste, as in any text field.
+                .combinedClickable(onClick = {}, onLongClick = { paste() }, onLongClickLabel = "Paste a number"),
             contentAlignment = Alignment.Center,
         ) {
-            if (digits.isEmpty()) {
+            if (digits.isEmpty() && clipHasText) {
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(c.surface)
+                        .clickable(onClickLabel = "Paste a number") { paste() }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(Icons.Default.ContentPaste, contentDescription = null, tint = c.gold, modifier = Modifier.size(18.dp))
+                    Text("Paste number", style = type.label, color = c.text)
+                }
+            } else if (digits.isEmpty()) {
                 Text("Enter a number", style = type.body, color = c.caption)
             } else {
                 Text(
@@ -233,7 +289,7 @@ private fun KeypadPane(vm: SoftphoneViewModel, keypadPrefs: KeypadPrefs) {
             )
             if (outboundLine != null) {
                 Text(
-                    formatPeerForDisplay(outboundLine.did),
+                    formatPeerForDisplay(outboundLine.did.ifBlank { outboundLine.ext }),
                     style = type.number.copy(fontSize = 13.sp),
                     color = c.gold,
                     maxLines = 1,
@@ -559,6 +615,7 @@ fun CallDetailScreen(
         Column(
             Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -608,7 +665,7 @@ fun CallDetailScreen(
                             .background(c.lineSlot(line.colorSlot)),
                     )
                     Text(
-                        "  ${line.label} · ${formatDidForDisplay(line.did)}",
+                        "  ${line.label}" + if (line.did.isNotBlank()) " · ${formatDidForDisplay(line.did)}" else "",
                         style = type.body,
                         color = c.muted,
                     )
@@ -627,16 +684,17 @@ fun CallDetailScreen(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // Calls back from the line the call was on, as on the desktop; another line is one tap below.
                 Button(
                     onClick = {
-                        if (state.lines.size > 1) pickLineForCall = true
-                        else vm.placeCall(record.lineId, record.peerNumber, name)
+                        if (line != null) vm.placeCall(record.lineId, record.peerNumber, name)
+                        else pickLineForCall = true
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = c.gold, contentColor = c.goldInk),
                 ) {
                     Icon(Icons.Default.Call, null)
-                    Text("  Call back")
+                    Text(if (line != null && state.lines.size > 1) "  Call back · ${line.label}" else "  Call back", maxLines = 1)
                 }
                 OutlinedButton(
                     onClick = {
@@ -649,6 +707,12 @@ fun CallDetailScreen(
                     Text("  Message", color = c.gold)
                 }
             }
+            if (line != null && state.lines.size > 1) {
+                TextButton(onClick = { pickLineForCall = true }) {
+                    Text("Call back from another line", color = c.muted)
+                }
+            }
+            PbxHistorySection(vm = vm, record = record)
             Spacer(Modifier.height(20.dp))
             // Details is reached from Recents and from the in-call banner, so it always
             // offers a way onward instead of relying on the back arrow alone.
@@ -775,7 +839,7 @@ fun LinePickerDialog(
                         )
                         Column(Modifier.padding(start = 12.dp)) {
                             Text(line.label, style = type.heading, color = c.text)
-                            NumberText(formatDidForDisplay(line.did), color = c.caption)
+                            NumberText(if (line.did.isNotBlank()) formatDidForDisplay(line.did) else "ext ${line.ext}", color = c.caption)
                         }
                     }
                 }

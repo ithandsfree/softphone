@@ -251,24 +251,17 @@
         <div class="panel-title">Assign</div>
         <div class="row two">
           <div>
-            <label for="extSelect">Extension (from Userman)</label>
+            <label for="extSelect">Extension (from User Management)</label>
             <select id="extSelect"><option value="">Loading…</option></select>
           </div>
           <div>
-            <label for="extManual">Or type extension</label>
-            <input id="extManual" type="text" inputmode="numeric" placeholder="1001"/>
+            <label>Owner in User Management</label>
+            <div id="ownerInfo" class="hint" style="padding:.55rem 0">Pick an extension.</div>
           </div>
         </div>
-        <div class="row two">
-          <div>
-            <label for="username">Userman username (optional override)</label>
-            <input id="username" type="text" placeholder="user@example.com"/>
-          </div>
-          <div>
-            <label for="email">Welcome email to</label>
-            <input id="email" type="email" placeholder="user@example.com"/>
-          </div>
-        </div>
+        <p class="hint">The setup link signs in as the extension's User Management user, so it is only ever emailed to
+          that user's address in User Management. To change the address, edit the user in User Management, then
+          press Refresh catalog.</p>
         <label for="label">Label</label>
         <input id="label" type="text" placeholder="ext 1001"/>
         <label for="installUrl">Install / APK landing URL (optional — auto latest dl/)</label>
@@ -366,6 +359,7 @@
   function fillCatalog(rows) {
     catalog = rows || [];
     var sel = document.getElementById('extSelect');
+    var picked = sel.value;
     sel.innerHTML = '<option value="">Select extension…</option>';
     rows.forEach(function (u) {
       (u.extensions && u.extensions.length ? u.extensions : [u.default_extension]).forEach(function (ext) {
@@ -379,16 +373,53 @@
         sel.appendChild(opt);
       });
     });
+    if (picked && sel.querySelector('option[value="' + picked.replace(/"/g, '') + '"]')) sel.value = picked;
+    applySelect();
+  }
+
+  /** The User Management owner of an extension, from the catalog (null when no user owns it). */
+  function ownerOf(ext) {
+    var found = null;
+    (catalog || []).forEach(function (u) {
+      var exts = (u.extensions && u.extensions.length) ? u.extensions : [u.default_extension];
+      if (!found && exts.indexOf(String(ext)) !== -1) found = u;
+    });
+    return found;
+  }
+
+  function ownerLine(u) {
+    if (!u) return 'No User Management user owns this extension.';
+    return esc(u.displayname || u.username) + ' · ' + esc(u.username)
+      + '<br>Setup email goes to: <strong>' + (u.email ? esc(u.email) : 'no address in User Management') + '</strong>';
   }
 
   function applySelect() {
-    var sel = document.getElementById('extSelect');
-    var opt = sel.options[sel.selectedIndex];
-    if (!opt || !opt.value) return;
-    document.getElementById('extManual').value = opt.value;
-    document.getElementById('username').value = opt.dataset.username || '';
-    document.getElementById('email').value = opt.dataset.email || '';
-    document.getElementById('label').value = opt.dataset.label || ('ext ' + opt.value);
+    var ext = document.getElementById('extSelect').value;
+    document.getElementById('ownerInfo').innerHTML = ext ? ownerLine(ownerOf(ext)) : 'Pick an extension.';
+    var label = document.getElementById('label');
+    if (ext && (label.value.trim() === '' || /^ext \d+$/.test(label.value.trim()))) label.value = 'ext ' + ext;
+  }
+
+  /** Asks before any email: which extension's link, and the User Management address it goes to. */
+  function confirmSend(ext, verb) {
+    var u = ownerOf(ext);
+    if (!u) { alert('No User Management user owns extension ' + ext + '. Refresh the catalog.'); return false; }
+    if (!u.email) { alert('The User Management user for ext ' + ext + ' has no email address. Add one in User Management, then Refresh catalog.'); return false; }
+    return confirm(verb + ' the setup link for ext ' + ext + ' (' + (u.displayname || u.username) + ') and email it to '
+      + u.email + '?\n\nThis link signs in as ' + u.username + '. Any earlier link for this extension stops working.');
+  }
+
+  async function removeExt(ext) {
+    var u = ownerOf(ext);
+    if (!confirm('Remove ext ' + ext + ' from the softphone list and cancel its setup link?')) return;
+    var signOut = confirm('Also sign out the phones and PCs already set up for '
+      + (u ? (u.displayname || u.username) : ('ext ' + ext)) + '?\n\nOK: sign them out.  Cancel: leave them signed in.'
+      + '\n\nTo lock someone out completely, also change or disable the user in User Management.');
+    var data = await api('POST', '/v1/admin/remove', { extension: ext, sign_out_devices: signOut });
+    flash(!!data.ok, data.ok
+      ? ('Removed ext ' + esc(ext) + (signOut ? ('; ' + (data.devices_signed_out || 0) + ' device sign-in(s) cancelled') : ''))
+      : ('Could not remove ext ' + esc(ext) + ': ' + esc(data.error || '')));
+    await refresh();
   }
 
   function renderAssignments(rows) {
@@ -402,22 +433,32 @@
       var emailed = r.email_sent_at
         ? ('sent ' + new Date(r.email_sent_at * 1000).toISOString())
         : '—';
+      // Flag a row whose saved address no longer matches User Management (the next send uses User Management).
+      var owner = ownerOf(r.extension);
+      var drift = owner && owner.email && owner.email.toLowerCase() !== String(r.email || '').toLowerCase()
+        ? '<div class="hint">User Management: ' + esc(owner.email) + ' (used for the next email)</div>' : '';
       html += '<tr>'
         + '<td><strong>' + esc(r.extension) + '</strong><br><span class="hint">' + esc(r.label || '') + '</span></td>'
-        + '<td class="mono">' + esc(r.username || '') + '<br>' + esc(r.email || '') + '</td>'
+        + '<td class="mono">' + esc(r.username || '') + '<br>' + esc(r.email || '') + drift + '</td>'
         + '<td><a href="' + esc(r.enrol_url) + '" target="_blank" rel="noopener">enrol link</a>'
         + '<div class="hint">exp ' + esc(r.token_exp_iso || '') + '</div></td>'
         + '<td class="hint">' + esc(emailed) + '</td>'
-        + '<td><button type="button" class="secondary btn-resend-row" data-ext="' + esc(r.extension) + '">Resend</button></td>'
+        + '<td><div class="actions" style="margin:0;flex-wrap:nowrap">'
+        + '<button type="button" class="secondary btn-resend-row" data-ext="' + esc(r.extension) + '">Resend</button>'
+        + '<button type="button" class="secondary btn-remove-row" data-ext="' + esc(r.extension) + '">Remove</button>'
+        + '</div></td>'
         + '</tr>';
     });
     html += '</tbody></table>';
     box.innerHTML = html;
     box.querySelectorAll('.btn-resend-row').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        document.getElementById('extManual').value = btn.dataset.ext;
-        document.getElementById('sendEmail').checked = true;
-        resend();
+        resend(btn.dataset.ext).catch(function (e) { flash(false, esc(e.message)); });
+      });
+    });
+    box.querySelectorAll('.btn-remove-row').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        removeExt(btn.dataset.ext).catch(function (e) { flash(false, esc(e.message)); });
       });
     });
   }
@@ -435,11 +476,13 @@
   }
 
   async function assign() {
-    var ext = document.getElementById('extManual').value.trim() || document.getElementById('extSelect').value.trim();
+    var ext = document.getElementById('extSelect').value.trim();
+    if (!ext) { flash(false, 'Pick an extension from the list.'); return; }
+    var sending = document.getElementById('sendEmail').checked;
+    if (sending && !confirmSend(ext, 'Assign ext ' + ext + ', create')) return;
+    if (!sending && !ownerOf(ext)) { flash(false, 'No User Management user owns ext ' + esc(ext) + '.'); return; }
     var body = {
       extension: ext,
-      username: document.getElementById('username').value.trim() || undefined,
-      email: document.getElementById('email').value.trim() || undefined,
       label: document.getElementById('label').value.trim() || undefined,
       install_url: document.getElementById('installUrl').value.trim() || undefined,
       send_email: document.getElementById('sendEmail').checked
@@ -457,12 +500,12 @@
     await refresh();
   }
 
-  async function resend() {
-    var ext = document.getElementById('extManual').value.trim() || document.getElementById('extSelect').value.trim();
-    var data = await api('POST', '/v1/admin/welcome-email', {
-      extension: ext,
-      email: document.getElementById('email').value.trim() || undefined
-    });
+  /** Re-issues and emails the link for [ext] (a row's Resend), or for the extension picked in the form. */
+  async function resend(ext) {
+    ext = String(ext || document.getElementById('extSelect').value || '').trim();
+    if (!ext) { flash(false, 'Pick an extension from the list.'); return; }
+    if (!confirmSend(ext, 'Re-issue')) return;
+    var data = await api('POST', '/v1/admin/welcome-email', { extension: ext });
     var a = data.assignment || {};
     var mail = data.email || {};
     flash(!!mail.ok, (mail.ok ? 'Welcome email sent to ' : 'Email failed for ')
@@ -542,8 +585,7 @@
   });
   document.getElementById('btnResend').addEventListener('click', function () {
     resend().catch(function (e) { flash(false, esc(e.message)); });
-  });
-  document.getElementById('extSelect').addEventListener('change', applySelect);
+  });  document.getElementById('extSelect').addEventListener('change', applySelect);
 
   bootstrap();
 })();

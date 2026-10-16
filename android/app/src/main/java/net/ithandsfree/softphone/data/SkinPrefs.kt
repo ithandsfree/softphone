@@ -20,13 +20,7 @@ import net.ithandsfree.softphone.ui.theme.SoftphoneSkins
  * 3. [BuildConfig.DEFAULT_SKIN_ID] (compile-time brand default)
  */
 class SkinPrefs(context: Context) {
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "ihf_softphone_skin_prefs",
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private val prefs = SecurePrefs.open(context, "ihf_softphone_skin_prefs")
 
     private val _skinId = MutableStateFlow(readResolvedId())
     val skinId: StateFlow<String> = _skinId.asStateFlow()

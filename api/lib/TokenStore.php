@@ -103,6 +103,24 @@ class TokenStore {
 		return $row;
 	}
 
+	/**
+	 * Signs out every phone and PC of User Management user [uid]: revokes their device tokens and unused setup
+	 * links. Admin sessions are kept. Returns how many tokens were removed.
+	 */
+	public function revokeForUser(int $uid): int {
+		$removed = 0;
+		$this->mutate(function (array $data) use ($uid, &$removed): array {
+			foreach ($data as $k => $row) {
+				if (is_array($row) && (int)($row['uid'] ?? 0) === $uid && ($row['role'] ?? '') !== 'admin') {
+					unset($data[$k]);
+					$removed++;
+				}
+			}
+			return $data;
+		});
+		return $removed;
+	}
+
 	/** Counts one more setup use of [token] and returns the new count (0 when unknown). */
 	public function countUse(string $token): int {
 		if ($token === '') {

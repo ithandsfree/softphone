@@ -33,8 +33,11 @@ android {
     defaultConfig {
         minSdk = 26
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.3.12"
+        versionCode = 59
+        versionName = "0.4.25"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Shown after the version in Settings > About ("0.4.0 Beta 1"). Empty for a final release.
+        buildConfigField("String", "RELEASE_LABEL", "\"Beta 1\"")
         // HTTPS enrol app-link host. Override per deployment; this tree ships a placeholder.
         manifestPlaceholders["enrolHost"] = "pbx.example.com"
     }
@@ -125,6 +128,11 @@ dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // Robolectric (pulled in by app-testing) makes androidx.test think it runs off-device; the car tests do not need it.
+    androidTestImplementation("androidx.car.app:app-testing:1.7.0") { exclude(group = "org.robolectric") }
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.0")
@@ -132,6 +140,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.3")
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // Android Telecom (self-managed calls): Bluetooth / car audio routing, car answer and hang-up, phoneCall FGS.
+    implementation("androidx.core:core-telecom:1.0.0")
+    implementation("androidx.car.app:app:1.7.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")

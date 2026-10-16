@@ -21,7 +21,8 @@ data class ContactPhone(
  */
 class DeviceContactsRepository(private val context: Context) {
 
-    fun loadContacts(limit: Int = 500): List<DeviceContact> {
+    /** Up to 0.4.19 the limit was 500, so in a large address book people after about the letter D were missing. */
+    fun loadContacts(limit: Int = 10_000): List<DeviceContact> {
         val cr = context.contentResolver
         val map = linkedMapOf<Long, MutableList<ContactPhone>>()
         val names = linkedMapOf<Long, String>()

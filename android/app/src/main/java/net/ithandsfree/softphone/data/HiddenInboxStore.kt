@@ -9,13 +9,7 @@ import androidx.security.crypto.MasterKey
  * Hidden peers are filtered from the inbox and labeled in status copy.
  */
 class HiddenInboxStore(context: Context) {
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "ihf_softphone_hidden_inbox",
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private val prefs = SecurePrefs.open(context, "ihf_softphone_hidden_inbox")
 
     fun hiddenPeers(accountId: String): Set<String> {
         val raw = prefs.getString(key(accountId), "").orEmpty()

@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import net.ithandsfree.softphone.BuildConfig
 import net.ithandsfree.softphone.data.SoftphoneAccount
@@ -26,6 +27,8 @@ import org.pjsip.pjsua2.pjsip_inv_state
 import org.pjsip.pjsua2.pjsip_status_code
 import org.pjsip.pjsua2.pjsip_transport_type_e
 import org.pjsip.pjsua2.pjsua_call_media_status
+import org.pjsip.pjsua2.OnCallTransferStatusParam
+import org.pjsip.pjsua2.pjsua_call_flag
 
 /**
  * Multi-account PJSUA2 engine for FreePBX PJSIP extensions.
@@ -44,7 +47,6 @@ class PjsipSipEngine(
 
     private var endpoint: Endpoint? = null
     private var started = false
-    private var udpTransportId = -1
     private var tcpTransportId = -1
     private var tlsTransportId = -1
 
@@ -52,14 +54,61 @@ class PjsipSipEngine(
     private var activeId: String? = null
     private val softAccounts = linkedMapOf<String, SoftAccount>()
 
-    private var currentCall: SoftCall? = null
-    private var callLineId: String? = null
-    private var callIncoming = false
-    private var callRemote = ""
-    private var callStateText = ""
+    /**
+     * One SIP call. Two can be up at once (call waiting): [primary] is the call on screen, [other] rings beside it
+     * or is on hold after Hold & answer.
+     */
+    private inner class Slot(val call: SoftCall, val lineId: String?, val incomingOrigin: Boolean) {
+        val key = ++nextKey
+        var remote = ""
+        var stateText = ""
+        /** Incoming and not answered yet. */
+        var ringing = incomingOrigin
+        var connectedAtElapsed = 0L
+        var held = false
+    }
+
+    private var nextKey = 0
+    private var primary: Slot? = null
+    private var other: Slot? = null
+    /** Attended transfer: the caller on hold while we talk to the transfer target (null when not transferring). */
+    private var consultHeld: Slot? = null
     private var speakerOn = false
+    private var muted = false
+    private var transferCode = 0
+    private var transferFinal = false
+    private var transferText = ""
+    private var audioByTelecom = false
+    private var waitingTone: android.media.ToneGenerator? = null
+    private val waitingBeep = object : Runnable {
+        override fun run() {
+            val ringing = synchronized(lock) { other?.ringing == true }
+            if (!ringing) return
+            runCatching {
+                val tone = waitingTone ?: android.media.ToneGenerator(AudioManager.STREAM_VOICE_CALL, 70)
+                    .also { waitingTone = it }
+                tone.startTone(android.media.ToneGenerator.TONE_SUP_CALL_WAITING, 600)
+            }
+            mainHandler.postDelayed(this, 4_500L)
+        }
+    }
+
+    /** Kept for the media callback, which needs the call that owns a media slot. */
+    private val currentCall: SoftCall? get() = primary?.call
+
 
     private var listener: SipEngine.Listener? = null
+    private val observers = java.util.concurrent.CopyOnWriteArrayList<SipEngine.Listener>()
+
+    override fun addObserver(observer: SipEngine.Listener) {
+        observers += observer
+    }
+
+    override fun signallingLabel(): String? = runCatching { preferredSignalling().name }.getOrNull()
+
+    override fun removeObserver(observer: SipEngine.Listener) {
+        observers -= observer
+    }
 
     /**
      * PJSUA2 aborts the process if any PJ API runs on a thread that has not
@@ -95,8 +144,8 @@ class PjsipSipEngine(
                 epConfig.logConfig.consoleLevel = 4
                 ep.libInit(epConfig)
 
-                // SIP TLS on 5061. TCP is the fallback when the TLS transport cannot
-                // be created. UDP is only a last resort (carrier NAT / one-way audio).
+                // SIP TLS on 5061. TCP 5060 is the only fallback. UDP signalling
+                // is not created: it breaks through NAT and the audio goes one way.
                 tlsTransportId = createTlsTransport(ep)
                 try {
                     val tcp = TransportConfig().apply { port = 0 }
@@ -106,11 +155,7 @@ class PjsipSipEngine(
                     tcpTransportId = -1
                 }
                 if (tlsTransportId < 0 && tcpTransportId < 0) {
-                    val udp = TransportConfig().apply { port = 0 }
-                    udpTransportId = ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, udp)
-                    Log.w(TAG, "Falling back to UDP SIP transport — expect NAT/one-way-audio risk")
-                } else {
-                    udpTransportId = -1
+                    throw IllegalStateException("SIP needs TLS or TCP. UDP is not used.")
                 }
 
                 ep.libStart()
@@ -121,7 +166,7 @@ class PjsipSipEngine(
                 ensurePjThreadLocked()
                 Log.i(
                     TAG,
-                    "PJSUA2 started (tls=$tlsTransportId tcp=$tcpTransportId udp=$udpTransportId)",
+                    "PJSUA2 started (tls=$tlsTransportId tcp=$tcpTransportId)",
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "PJSUA2 start failed", e)
@@ -200,7 +245,7 @@ class PjsipSipEngine(
         synchronized(lock) {
             ensureStartedLocked()
             ensurePjThreadLocked()
-            if (currentCall != null) {
+            if (primary != null) {
                 throw IllegalStateException("Already in a call — hang up first")
             }
             val digits = outboundDialDigits(destination)
@@ -219,25 +264,20 @@ class PjsipSipEngine(
                 )
             }
             val domain = domainOf(acc.cfg)
-            val uri = if (digits.contains("@")) {
-                "sip:$digits"
-            } else {
-                "sip:$digits@$domain"
-            }
+            val uri = sipCallUri(digits, domain, preferredSignalling())
 
             val call = SoftCall(acc)
             val prm = CallOpParam(true)
             try {
                 call.makeCall(uri, prm)
-                currentCall = call
-                callLineId = lineId
-                callIncoming = false
-                callRemote = digits
-                callStateText = "Calling"
+                primary = Slot(call, lineId, incomingOrigin = false).apply {
+                    remote = digits
+                    stateText = "Calling"
+                }
+                resetTransferLocked()
                 notifyChanged()
             } catch (e: Exception) {
                 runCatching { call.delete() }
-                currentCall = null
                 throw e
             }
         }
@@ -246,20 +286,21 @@ class PjsipSipEngine(
     override fun hangup() {
         synchronized(lock) {
             ensurePjThreadLocked()
-            hangupLocked()
+            val slot = primary ?: return
+            runCatching { slot.call.hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_DECLINE }) }
+            endSlotLocked(slot)
+            notifyChanged()
         }
     }
 
     override fun answer() {
         synchronized(lock) {
             ensurePjThreadLocked()
-            val call = currentCall ?: return
-            val prm = CallOpParam().apply {
-                statusCode = pjsip_status_code.PJSIP_SC_OK
-            }
-            call.answer(prm)
-            callIncoming = false
-            callStateText = "Connected"
+            val slot = primary ?: return
+            slot.call.answer(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_OK })
+            slot.ringing = false
+            slot.stateText = "Connected"
+            markConnectedLocked(slot)
             // Audio mode must flip on answer even when Activity was backgrounded.
             applySpeakerLocked()
             notifyChanged()
@@ -270,12 +311,9 @@ class PjsipSipEngine(
     override fun decline() {
         synchronized(lock) {
             ensurePjThreadLocked()
-            val call = currentCall ?: return
-            val prm = CallOpParam().apply {
-                statusCode = pjsip_status_code.PJSIP_SC_DECLINE
-            }
-            runCatching { call.hangup(prm) }
-            clearCallLocked()
+            val slot = primary ?: return
+            runCatching { slot.call.hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_DECLINE }) }
+            endSlotLocked(slot)
             notifyChanged()
         }
     }
@@ -284,6 +322,180 @@ class PjsipSipEngine(
         synchronized(lock) {
             speakerOn = on
             applySpeakerLocked()
+            notifyChanged()
+        }
+    }
+
+    override fun setAudioManagedByTelecom(managed: Boolean) {
+        synchronized(lock) {
+            audioByTelecom = managed
+            if (!managed) applySpeakerLocked()
+        }
+    }
+
+    override fun setMuted(muted: Boolean) {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            this.muted = muted
+            applyMuteLocked()
+            notifyChanged()
+        }
+    }
+
+    override fun setHold(hold: Boolean) {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val slot = primary ?: return
+            if (slot.ringing || slot.held == hold) return
+            if (hold) {
+                slot.call.setHold(CallOpParam(true))
+            } else {
+                slot.call.reinvite(unholdParam())
+            }
+            slot.held = hold
+            notifyChanged()
+        }
+    }
+
+    override fun dtmf(digits: String) {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val slot = primary ?: return
+            if (slot.ringing || digits.isBlank()) return
+            runCatching { slot.call.dialDtmf(digits) }.onFailure { Log.w(TAG, "dtmf failed: ${it.message}") }
+        }
+    }
+
+    override fun transfer(destination: String) {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val slot = primary ?: throw IllegalStateException("No call to transfer")
+            if (slot.ringing) throw IllegalStateException("Answer the call first")
+            val digits = outboundDialDigits(destination)
+            if (digits.isBlank()) throw IllegalArgumentException("Enter a number to transfer to")
+            val acc = softAccounts[slot.lineId] ?: softAccounts[activeId]
+                ?: throw IllegalStateException("SIP account not ready")
+            val uri = sipCallUri(digits, domainOf(acc.cfg), preferredSignalling())
+            resetTransferLocked()
+            slot.call.xfer(uri, CallOpParam(true))
+            notifyChanged()
+        }
+    }
+
+    override fun waitingAnswer() {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val waiting = other?.takeIf { it.ringing } ?: return
+            val current = primary
+            if (current != null && !current.held && !current.ringing) {
+                current.call.setHold(CallOpParam(true))
+                current.held = true
+            }
+            stopWaitingBeepLocked()
+            // Swap first so the CONFIRMED callback finds the answered call on screen.
+            primary = waiting
+            other = current
+            waiting.call.answer(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_OK })
+            waiting.ringing = false
+            waiting.stateText = "Connected"
+            markConnectedLocked(waiting)
+            applySpeakerLocked()
+            notifyChanged()
+        }
+        mainHandler.post { IncomingCallNotifier.cancel(appContext) }
+    }
+
+    override fun waitingEnd() {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val slot = other ?: return
+            val code = if (slot.ringing) pjsip_status_code.PJSIP_SC_BUSY_HERE else pjsip_status_code.PJSIP_SC_OK
+            // 486 lets the PBX carry on as for a busy line (other devices, then voicemail).
+            runCatching { slot.call.hangup(CallOpParam().apply { statusCode = code }) }
+            endSlotLocked(slot)
+            notifyChanged()
+        }
+        mainHandler.post { IncomingCallNotifier.cancel(appContext) }
+    }
+
+    override fun swap() {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val held = other?.takeIf { !it.ringing } ?: return
+            val current = primary
+            if (current != null && !current.held) {
+                current.call.setHold(CallOpParam(true))
+                current.held = true
+            }
+            held.call.reinvite(unholdParam())
+            held.held = false
+            primary = held
+            other = current
+            notifyChanged()
+        }
+    }
+
+    override fun consult(destination: String) {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val caller = primary ?: throw IllegalStateException("No call to transfer")
+            if (caller.ringing) throw IllegalStateException("Answer the call first")
+            if (other != null) throw IllegalStateException("End the other call first")
+            val digits = outboundDialDigits(destination)
+            if (digits.isBlank()) throw IllegalArgumentException("Enter a number to transfer to")
+            // Same line as the caller's call, so the second call leaves on that line's own route.
+            val acc = softAccounts[caller.lineId] ?: softAccounts[activeId]
+                ?: throw IllegalStateException("SIP account not ready")
+            if (!caller.held) {
+                caller.call.setHold(CallOpParam(true))
+                caller.held = true
+            }
+            val call = SoftCall(acc)
+            try {
+                call.makeCall(sipCallUri(digits, domainOf(acc.cfg), preferredSignalling()), CallOpParam(true))
+            } catch (e: Exception) {
+                runCatching { call.delete() }
+                runCatching { caller.call.reinvite(unholdParam()) }
+                caller.held = false
+                throw e
+            }
+            primary = Slot(call, caller.lineId, incomingOrigin = false).apply {
+                remote = digits
+                stateText = "Calling"
+            }
+            other = caller
+            consultHeld = caller
+            resetTransferLocked()
+            notifyChanged()
+        }
+    }
+
+    override fun completeConsult() {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val caller = consultHeld ?: return
+            val target = listOfNotNull(primary, other).firstOrNull { it !== caller } ?: return
+            resetTransferLocked()
+            // REFER with Replaces: the PBX joins the caller to the transfer target, then both our legs end.
+            caller.call.xferReplaces(target.call, CallOpParam(true))
+            notifyChanged()
+        }
+    }
+
+    override fun cancelConsult() {
+        synchronized(lock) {
+            ensurePjThreadLocked()
+            val caller = consultHeld ?: return
+            val target = listOfNotNull(primary, other).firstOrNull { it !== caller }
+            consultHeld = null
+            if (target != null) {
+                runCatching { target.call.hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_OK }) }
+                endSlotLocked(target)
+            }
+            if (primary === caller && caller.held) {
+                runCatching { caller.call.reinvite(unholdParam()) }
+                caller.held = false
+            }
             notifyChanged()
         }
     }
@@ -317,19 +529,31 @@ class PjsipSipEngine(
 
     override fun callSnapshot(): SipCallSnapshot {
         synchronized(lock) {
-            val call = currentCall ?: return SipCallSnapshot(speakerOn = speakerOn)
+            val slot = primary ?: return SipCallSnapshot(
+                speakerOn = speakerOn,
+                transferCode = transferCode,
+                transferFinal = transferFinal,
+                transferText = transferText,
+            )
             ensurePjThreadLocked()
             return SipCallSnapshot(
                 active = true,
-                incoming = callIncoming,
-                remote = callRemote.ifBlank {
-                    runCatching { call.info.remoteUri }.getOrNull().orEmpty()
-                },
-                stateText = callStateText.ifBlank {
-                    runCatching { call.info.stateText }.getOrNull().orEmpty()
-                },
-                lineId = callLineId,
+                incoming = slot.ringing,
+                remote = slot.remote.ifBlank { runCatching { slot.call.info.remoteUri }.getOrNull().orEmpty() },
+                stateText = slot.stateText.ifBlank { runCatching { slot.call.info.stateText }.getOrNull().orEmpty() },
+                lineId = slot.lineId,
                 speakerOn = speakerOn,
+                connectedAtElapsed = slot.connectedAtElapsed,
+                key = slot.key,
+                muted = muted,
+                held = slot.held,
+                waiting = other?.let {
+                    SipWaitingSnapshot(it.key, it.remote, it.lineId, it.ringing, it.connectedAtElapsed)
+                },
+                transferCode = transferCode,
+                transferFinal = transferFinal,
+                transferText = transferText,
+                consulting = consultHeld != null && other === consultHeld,
             )
         }
     }
@@ -371,43 +595,103 @@ class PjsipSipEngine(
         ensurePjThreadLocked()
     }
 
+    private fun unholdParam(): CallOpParam = CallOpParam(true).apply {
+        opt.flag = pjsua_call_flag.PJSUA_CALL_UNHOLD.toLong()
+    }
+
+    /** Hangs up every call (stop). */
     private fun hangupLocked() {
-        val call = currentCall ?: return
-        runCatching {
-            val prm = CallOpParam().apply {
-                statusCode = pjsip_status_code.PJSIP_SC_DECLINE
-            }
-            call.hangup(prm)
+        listOfNotNull(other, primary).forEach { slot ->
+            runCatching { slot.call.hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_DECLINE }) }
+            endSlotLocked(slot)
         }
-        clearCallLocked()
         notifyChanged()
     }
 
-    private fun clearCallLocked() {
-        currentCall?.let { runCatching { it.delete() } }
-        currentCall = null
-        callLineId = null
-        callIncoming = false
-        callRemote = ""
-        callStateText = ""
-        speakerOn = false
-        applySpeakerLocked()
-        mainHandler.post { IncomingCallNotifier.cancel(appContext) }
+    private fun markConnectedLocked(slot: Slot) {
+        if (slot.connectedAtElapsed == 0L) {
+            slot.connectedAtElapsed = SystemClock.elapsedRealtime()
+        }
+    }
+
+    private fun resetTransferLocked() {
+        transferCode = 0
+        transferFinal = false
+        transferText = ""
+    }
+
+    /**
+     * A call ended. When it was the call on screen and a second call exists, that one takes its place: a ringing
+     * one becomes a normal incoming call (full-screen ring), a held one stays on hold until Resume.
+     */
+    private fun endSlotLocked(slot: Slot) {
+        runCatching { slot.call.delete() }
+        // Either call of an attended transfer ending ends the transfer; the other call stays as an ordinary call.
+        if (consultHeld != null && (slot === consultHeld || slot === primary || slot === other)) consultHeld = null
+        if (other === slot) {
+            if (slot.ringing) stopWaitingBeepLocked()
+            other = null
+            return
+        }
+        if (primary !== slot) return
+        val next = other
+        other = null
+        primary = next
+        if (next == null) {
+            muted = false
+            applyMuteLocked()
+            speakerOn = false
+            applySpeakerLocked()
+            mainHandler.post { IncomingCallNotifier.cancel(appContext) }
+            return
+        }
+        if (next.ringing) {
+            stopWaitingBeepLocked()
+            val acc = softAccounts[next.lineId]
+            val label = acc?.cfg?.label?.ifBlank { acc.cfg.sipExtension } ?: ""
+            val remote = next.remote
+            val lineIdForRing = next.lineId
+            mainHandler.post { IncomingCallNotifier.show(appContext, remote, label, lineIdForRing) }
+        }
+    }
+
+    private fun stopWaitingBeepLocked() {
+        mainHandler.removeCallbacks(waitingBeep)
+        runCatching { waitingTone?.stopTone() }
+    }
+
+    /**
+     * Microphone only. The sound device is one bridge port for both mic and speaker: its *Tx* level is what the mic
+     * sends into the bridge, its *Rx* level is what the speaker plays. Mute sets Tx to 0, so the caller is still heard.
+     */
+    private fun applyMuteLocked() {
+        val ep = endpoint ?: return
+        runCatching {
+            val device = ep.audDevManager().captureDevMedia
+            device.adjustTxLevel(if (muted && primary != null) 0f else 1f)
+            device.adjustRxLevel(1f)
+        }
+            .onFailure { Log.w(TAG, "mute failed: ${it.message}") }
     }
 
     private fun applySpeakerLocked() {
+        // Android Telecom routes call audio (Bluetooth, car, speaker) once the call is registered with it.
+        if (audioByTelecom) return
         runCatching {
             // MODE_IN_COMMUNICATION is required for speakerphone routing on modern Android.
             audioManager.mode =
-                if (currentCall != null) AudioManager.MODE_IN_COMMUNICATION
+                if (primary != null) AudioManager.MODE_IN_COMMUNICATION
                 else AudioManager.MODE_NORMAL
             @Suppress("DEPRECATION")
-            audioManager.isSpeakerphoneOn = speakerOn && currentCall != null
+            audioManager.isSpeakerphoneOn = speakerOn && primary != null
         }.onFailure { Log.w(TAG, "speakerphone set failed: ${it.message}") }
     }
 
     private fun notifyChanged() {
-        mainHandler.post { listener?.onSipChanged() }
+        mainHandler.post {
+            listener?.onSipChanged()
+            observers.forEach { runCatching { it.onSipChanged() } }
+        }
     }
 
     private fun domainOf(cfg: SoftphoneAccount): String =
@@ -416,7 +700,7 @@ class PjsipSipEngine(
     private fun preferredSignalling(): SipSignalling = when {
         tlsTransportId >= 0 -> SipSignalling.TLS
         tcpTransportId >= 0 -> SipSignalling.TCP
-        else -> SipSignalling.UDP
+        else -> throw IllegalStateException("SIP needs TLS or TCP. UDP is not used.")
     }
 
     private fun createTlsTransport(ep: Endpoint): Int {
@@ -470,14 +754,14 @@ class PjsipSipEngine(
                 acfg.natConfig.viaRewriteUse = 1
                 acfg.natConfig.sdpNatRewriteUse = 1
             }.onFailure { Log.w(TAG, "natConfig unavailable: ${it.message}") }
-            // TLS when the transport exists. TCP, then UDP, only if it does not.
+            // TLS when that transport exists. TCP is the only fallback.
             when (signalling) {
                 SipSignalling.TLS -> {
                     acfg.sipConfig.transportId = tlsTransportId
                     acfg.sipConfig.contactUriParams = ";transport=tls"
                 }
                 SipSignalling.TCP -> acfg.sipConfig.transportId = tcpTransportId
-                SipSignalling.UDP -> acfg.sipConfig.transportId = udpTransportId
+                SipSignalling.UDP -> throw IllegalStateException("UDP SIP is not used.")
             }
             // Optional SDES/SRTP so shared extensions with FreePBX Media Encryption
             // (sdes) still negotiate. Over TLS, SRTP requires secure signalling.
@@ -497,15 +781,13 @@ class PjsipSipEngine(
             if (prm == null) return
             val remote: String
             val label: String
+            val waiting: Boolean
             synchronized(lock) {
-                if (currentCall != null) {
-                    // Busy: reject second call for now.
+                if (primary != null && other != null) {
+                    // Two calls already up: busy, so the PBX tries other devices, then voicemail.
                     try {
                         val busy = SoftCall(this, prm.callId)
-                        val op = CallOpParam().apply {
-                            statusCode = pjsip_status_code.PJSIP_SC_BUSY_HERE
-                        }
-                        busy.hangup(op)
+                        busy.hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_BUSY_HERE })
                         busy.delete()
                     } catch (e: Exception) {
                         Log.w(TAG, "busy reject failed", e)
@@ -513,18 +795,23 @@ class PjsipSipEngine(
                     return
                 }
                 val call = SoftCall(this, prm.callId)
-                currentCall = call
-                callLineId = cfg.id
-                callIncoming = true
-                callRemote = runCatching { call.info.remoteUri }.getOrNull().orEmpty()
-                callStateText = "Incoming"
-                remote = callRemote
+                val slot = Slot(call, cfg.id, incomingOrigin = true).apply {
+                    this.remote = runCatching { call.info.remoteUri }.getOrNull().orEmpty()
+                    stateText = "Incoming"
+                }
+                runCatching { call.answer(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_RINGING }) }
+                waiting = primary != null
+                if (waiting) other = slot else primary = slot
+                remote = slot.remote
                 label = cfg.label.ifBlank { cfg.sipExtension }
                 notifyChanged()
             }
-            // Full-screen ring — works when Activity is backgrounded / locked.
-            mainHandler.post {
-                IncomingCallNotifier.show(appContext, remote, label)
+            if (waiting) {
+                // Call waiting: a short beep in the call audio; the in-call screen offers Hold & answer.
+                mainHandler.post(waitingBeep)
+            } else {
+                // Full-screen ring — works when Activity is backgrounded / locked.
+                mainHandler.post { IncomingCallNotifier.show(appContext, remote, label, cfg.id) }
             }
         }
     }
@@ -533,16 +820,49 @@ class PjsipSipEngine(
         constructor(account: SoftAccount) : super(account)
         constructor(account: SoftAccount, callId: Int) : super(account, callId)
 
+        private fun slotLocked(): Slot? = when {
+            primary?.call === this -> primary
+            other?.call === this -> other
+            else -> null
+        }
+
         override fun onCallState(prm: OnCallStateParam?) {
             val ci = runCatching { info }.getOrNull()
             val text = ci?.stateText.orEmpty()
             val state = ci?.state ?: pjsip_inv_state.PJSIP_INV_STATE_NULL
-            Log.i(TAG, "call state=$text ($state)")
+            Log.i(TAG, "call state=$text ($state) status=${ci?.lastStatusCode}")
             synchronized(lock) {
-                if (currentCall !== this) return
-                callStateText = text
+                val slot = slotLocked() ?: return
+                slot.stateText = text
                 if (state == pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED) {
-                    clearCallLocked()
+                    endSlotLocked(slot)
+                } else if (state == pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED) {
+                    slot.ringing = false
+                    markConnectedLocked(slot)
+                }
+            }
+            notifyChanged()
+        }
+
+        /** NOTIFY progress of a blind transfer. After a final 2xx we end our own leg (RFC 5589). */
+        override fun onCallTransferStatus(prm: OnCallTransferStatusParam?) {
+            if (prm == null) return
+            Log.i(TAG, "transfer status ${prm.statusCode} ${prm.reason} final=${prm.finalNotify}")
+            synchronized(lock) {
+                transferCode = prm.statusCode
+                transferFinal = prm.finalNotify
+                transferText = prm.reason.orEmpty()
+                if (prm.finalNotify && prm.statusCode / 100 == 2) {
+                    prm.cont = false
+                    // Attended transfer done: our call to the transfer target ends too (the PBX usually ends it).
+                    val mine = slotLocked()
+                    if (mine != null && mine === consultHeld) {
+                        listOfNotNull(primary, other).firstOrNull { it !== mine }?.let { target ->
+                            runCatching { target.call.hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_OK }) }
+                        }
+                    }
+                    // The DISCONNECTED callback ends the slot; deleting the call inside its own callback is unsafe.
+                    runCatching { hangup(CallOpParam().apply { statusCode = pjsip_status_code.PJSIP_SC_OK }) }
                 }
             }
             notifyChanged()
@@ -566,8 +886,11 @@ class PjsipSipEngine(
                     aud.startTransmit(playback)
                     capture.startTransmit(aud)
                 }
-                // Re-apply speaker route after media connects (device can reset on answer).
-                synchronized(lock) { applySpeakerLocked() }
+                // Re-apply speaker route and mute after media connects (device can reset on answer).
+                synchronized(lock) {
+                    applySpeakerLocked()
+                    applyMuteLocked()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "media connect failed", e)
             }

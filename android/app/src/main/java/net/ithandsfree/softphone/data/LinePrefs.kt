@@ -14,13 +14,7 @@ import androidx.security.crypto.MasterKey
  * session state in the ViewModel and must not rewrite this preference.
  */
 class LinePrefs(context: Context) {
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "ihf_softphone_line_prefs",
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private val prefs = SecurePrefs.open(context, "ihf_softphone_line_prefs")
 
     /** Default extension id (app-open seed). Legacy key name kept. */
     fun activeLineId(): String? = prefs.getString(KEY_ACTIVE, null)

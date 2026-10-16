@@ -2059,7 +2059,7 @@ class PhoneFrame(
         }
     }
 
-    /** Name shown for a line: its extension ("9333"), unless the owner gave it a custom name on the Lines page. */
+    /** Name shown for a line: its extension ("1001"), unless the owner gave it a custom name on the Lines page. */
     private fun lineLabel(extension: String?): String {
         val lines = session.lines()
         val index = lines.indexOfFirst { it.extension == extension }

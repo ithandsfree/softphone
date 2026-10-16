@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pictures from conversations, shared or copied out of the app (ChatImageExport). Nothing else is exposed. -->
+<paths>
+    <cache-path name="shared_images" path="shared_images/" />
+</paths>
